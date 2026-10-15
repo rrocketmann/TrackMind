@@ -1,4 +1,4 @@
-"""Save and load a GRPO actor. The actor stores no picture encoder."""
+"""Save and load a PPO actor. The actor stores no picture encoder."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.state import obs_dim
 
-ARCH = "state-grpo-v1"
+ARCH = "state-ppo-v1"
 
 
 def read_checkpoint(path: Path, device: torch.device) -> dict[str, Any]:

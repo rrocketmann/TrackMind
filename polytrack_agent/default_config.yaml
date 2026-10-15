@@ -73,12 +73,12 @@ rl:
   group_size: 4          # laps collected before one PPO update
   hidden: 128
   lr: 0.0003
-  resume: true           # continue from runs/grpo/last.pt when the layout matches
+  resume: true           # continue from runs/ppo/last.pt when the layout matches
   device: auto
-  out_dir: runs/grpo
+  out_dir: runs/ppo
 
 play:
-  checkpoint: runs/grpo/best.pt
+  checkpoint: runs/ppo/best.pt
   mode: discrete         # discrete | continuous
   threshold_on: 0.62
   threshold_off: 0.38

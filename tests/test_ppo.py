@@ -1,4 +1,4 @@
-"""GRPO pieces that do not download DINOv3 or open Chromium."""
+"""PPO pieces that do not download DINOv3 or open Chromium."""
 
 from __future__ import annotations
 
@@ -13,11 +13,10 @@ from polytrack_agent.rl.actions import action_masks, forward_ids, mask_for
 from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpoint
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
-from polytrack_agent.rl.grpo import group_advantages, grpo_loss, grpo_update
 from polytrack_agent.rl.model import StateActorCritic
-from polytrack_agent.rl.ppo import ppo_update
+from polytrack_agent.rl.ppo import ppo_loss, ppo_update
 from polytrack_agent.rl.state import LapNumbers, obs_dim
-from polytrack_agent.rl.trainer import _episode_gae, train_grpo
+from polytrack_agent.rl.trainer import _episode_gae, train_ppo
 
 
 def test_action_table_is_exclusive():
@@ -52,40 +51,34 @@ def test_cpu_setup_does_not_touch_cuda():
     assert configure_torch(torch.device("cpu")) == "cpu"
 
 
-def test_group_advantages_are_shared_inside_a_lap():
-    advantages = group_advantages([0.0, 2.0], [1, 2])
-    assert advantages.shape == (3,)
-    assert advantages[0] < 0 < advantages[1]
-    assert abs(float(advantages[1] - advantages[2])) < 1e-6
-    assert np.allclose(group_advantages([1.0, 1.0], [2, 2]), 0.0)
-
-
-def test_grpo_loss_reaches_the_actor():
+def test_ppo_loss_reaches_the_actor_and_value():
     model = StateActorCritic(obs_dim=obs_dim(27), n_actions=27, hidden=32)
-    tokens = torch.randn(8, obs_dim(27))
-    logits, _values = model(tokens)
+    observations = torch.randn(8, obs_dim(27))
+    logits, values = model(observations)
     actions = torch.randint(0, 27, (8,))
     old = torch.zeros(8)
     advantages = torch.tensor([-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0])
-    loss, stats = grpo_loss(logits, actions, old, advantages, 0.2, 0.01, 0.02, 0.01)
+    returns = advantages + values.detach()
+    loss, stats = ppo_loss(logits, values, actions, old, advantages, returns, 0.2, 0.01, 0.5, 0.01)
     loss.backward()
     assert model.policy.weight.grad is not None
-    assert model.value.weight.grad is None
+    assert model.value.weight.grad is not None
     assert np.isfinite(stats["loss"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     before = model.policy.weight.detach().clone()
-    grpo_update(
+    ppo_update(
         model,
         optimizer,
-        tokens.detach(),
+        observations.detach(),
         actions,
         old,
         advantages,
+        returns.detach(),
         epochs=1,
         minibatch_size=4,
         clip=0.2,
         entropy_coef=0.01,
-        kl_coef=0.02,
+        value_coef=0.5,
         unimix=0.01,
     )
     assert not torch.equal(before, model.policy.weight)
@@ -105,7 +98,7 @@ class _Cap:
         return None
 
 
-def test_grpo_trainer_updates_on_a_fake_window(tmp_path):
+def test_ppo_trainer_updates_on_a_fake_window(tmp_path):
     cfg = load_config(None)
     cfg["capture"]["fps"] = 1000
     cfg["capture"]["region"] = {"left": 0, "top": 0, "width": 32, "height": 24}
@@ -140,7 +133,7 @@ def test_grpo_trainer_updates_on_a_fake_window(tmp_path):
     )
     env = PolyTrackVisionEnv(cfg, capture=_Cap(start), dry_run=True, progress=progress)
     try:
-        report = train_grpo(cfg, env=env, max_updates=1)
+        report = train_ppo(cfg, env=env, max_updates=1)
     finally:
         env.close()
     assert report["updates"] == 1
@@ -219,7 +212,7 @@ def test_loaded_actor_presses_a_legal_chord(tmp_path):
     cfg = load_config(None)
     cfg["record"]["keys"] = ["w", "a", "s", "d"]
     payload = {
-        "arch": "state-grpo-v1",
+        "arch": "state-ppo-v1",
         "keys": ["w", "a", "s", "d", "q", "e"],
         "n_actions": 27,
         "obs_dim": obs_dim(27),

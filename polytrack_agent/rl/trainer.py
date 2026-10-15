@@ -87,7 +87,7 @@ def _resume(path: Path, model: StateActorCritic, device: torch.device) -> bool:
     return True
 
 
-def train_grpo(
+def train_ppo(
     cfg: dict,
     reference: Path | None = None,
     env: PolyTrackVisionEnv | None = None,
@@ -99,7 +99,7 @@ def train_grpo(
     advantage from the value head. The reference lap is the progress sensor.
     Pass `env` only from tests. A real run opens polytrack.dev in Chromium
     when that window is not already up. A reference lap is required.
-    `runs/grpo/last.pt` is loaded when it matches this actor.
+    `runs/ppo/last.pt` is loaded when it matches this actor.
     """
     rl_cfg = cfg["rl"]
     device = resolve_device(str(rl_cfg.get("device") or "auto"))
@@ -119,7 +119,7 @@ def train_grpo(
     chords = n_actions(env.keys)
     hidden = int(rl_cfg.get("hidden") or 128)
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
-    out_dir = Path(rl_cfg.get("out_dir") or "runs/grpo")
+    out_dir = Path(rl_cfg.get("out_dir") or "runs/ppo")
     out_dir.mkdir(parents=True, exist_ok=True)
     resumed = bool(rl_cfg.get("resume", True)) and _resume(out_dir / "last.pt", model, device)
     if not resumed:

@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     play.add_argument("--max-frames", type=int, default=0)
     play.add_argument("--reference", type=Path, default=None)
     play.add_argument("--no-log", action="store_true")
-    play.add_argument("--episodes", type=int, default=None, help="GRPO eval episodes. Default 5.")
+    play.add_argument("--episodes", type=int, default=None, help="PPO eval episodes. Default 5.")
     play.set_defaults(func=cmd_play)
     return parser
 
@@ -126,7 +126,7 @@ def cmd_record(cfg: dict, args) -> int:
 
 
 def cmd_train(cfg: dict, args) -> int:
-    from polytrack_agent.rl.trainer import train_grpo
+    from polytrack_agent.rl.trainer import train_ppo
 
     if args.device is not None:
         cfg["rl"]["device"] = args.device
@@ -135,7 +135,7 @@ def cmd_train(cfg: dict, args) -> int:
     reference = args.reference
     if reference is None and cfg["play"].get("reference"):
         reference = Path(cfg["play"]["reference"])
-    train_grpo(cfg, reference)
+    train_ppo(cfg, reference)
     return 0
 
 

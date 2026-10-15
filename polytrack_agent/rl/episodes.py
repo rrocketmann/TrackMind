@@ -44,7 +44,7 @@ def run_episodes(
     settle = float(cfg["rl"].get("finish_settle_s") or 0.0)
     rows: list[dict] = []
     log.info(
-        "GRPO eval, %s episodes, in Chromium at polytrack.dev. A real finish is submitted by the game.",
+        "PPO eval, %s episodes, in Chromium at polytrack.dev. A real finish is submitted by the game.",
         episodes,
     )
     try:
