@@ -9,11 +9,13 @@ from polytrack_agent.config import load_config
 from polytrack_agent.env import PolyTrackVisionEnv
 from polytrack_agent.obs.preprocess import rgb_to_tiny_gray
 from polytrack_agent.obs.progress import ReferenceProgress
-from polytrack_agent.rl.actions import action_masks
+from polytrack_agent.rl.actions import action_masks, mask_for
+from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpoint
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.grpo import group_advantages, grpo_loss, grpo_update
-from polytrack_agent.rl.model import TokenActorCritic
+from polytrack_agent.rl.model import StateActorCritic
+from polytrack_agent.rl.state import obs_dim
 from polytrack_agent.rl.trainer import train_grpo
 
 
@@ -58,8 +60,8 @@ def test_group_advantages_are_shared_inside_a_lap():
 
 
 def test_grpo_loss_reaches_the_actor():
-    model = TokenActorCritic(feature_dim=16, n_tokens=4, stack=2, n_actions=27, layers=1, heads=4, dropout=0.0)
-    tokens = torch.randn(8, 2, 4, 16)
+    model = StateActorCritic(obs_dim=obs_dim(27), n_actions=27, hidden=32)
+    tokens = torch.randn(8, obs_dim(27))
     logits, _values = model(tokens)
     actions = torch.randint(0, 27, (8,))
     old = torch.zeros(8)
@@ -86,17 +88,6 @@ def test_grpo_loss_reaches_the_actor():
         unimix=0.01,
     )
     assert not torch.equal(before, model.policy.weight)
-
-
-class _Encoder:
-    model_id = "fake"
-    image_size = (12, 16)
-    hidden_size = 16
-    n_tokens = 4
-    pool_hw = (2, 2)
-
-    def encode_frames(self, frames):
-        return torch.zeros(frames.shape[0], self.n_tokens, self.hidden_size, device=frames.device)
 
 
 class _Cap:
@@ -126,8 +117,7 @@ def test_grpo_trainer_updates_on_a_fake_window(tmp_path):
     cfg["rl"]["group_size"] = 2
     cfg["rl"]["epochs"] = 1
     cfg["rl"]["minibatch_size"] = 2
-    cfg["rl"]["transformer_layers"] = 1
-    cfg["rl"]["transformer_heads"] = 4
+    cfg["rl"]["hidden"] = 32
     cfg["rl"]["device"] = "cpu"
     cfg["rl"]["stuck_s"] = 30
     cfg["rl"]["timeout_s"] = 0.05
@@ -149,8 +139,32 @@ def test_grpo_trainer_updates_on_a_fake_window(tmp_path):
     )
     env = PolyTrackVisionEnv(cfg, capture=_Cap(start), dry_run=True, progress=progress)
     try:
-        report = train_grpo(cfg, encoder=_Encoder(), env=env, max_updates=1)
+        report = train_grpo(cfg, env=env, max_updates=1)
     finally:
         env.close()
     assert report["updates"] == 1
     assert (tmp_path / "run" / "last.pt").is_file()
+
+
+def test_loaded_actor_presses_a_legal_chord(tmp_path):
+    cfg = load_config(None)
+    cfg["record"]["keys"] = ["w", "a", "s", "d"]
+    payload = {
+        "arch": "state-grpo-v1",
+        "keys": ["w", "a", "s", "d", "q", "e"],
+        "n_actions": 27,
+        "obs_dim": obs_dim(27),
+        "hidden": 32,
+        "state_dict": StateActorCritic(obs_dim=obs_dim(27), n_actions=27, hidden=32).state_dict(),
+    }
+    bound = bind_runtime(cfg, payload)
+    assert bound["record"]["keys"] == ["w", "a", "s", "d", "q", "e"]
+    assert cfg["record"]["keys"] == ["w", "a", "s", "d"]
+    model = load_actor(payload, torch.device("cpu"))
+    features = torch.zeros(1, obs_dim(27))
+    action, _logp, _value = model.act(features, greedy=True)
+    mask = mask_for(int(action.item()), bound["record"]["keys"])
+    assert mask in action_masks(bound["record"]["keys"])
+    path = tmp_path / "actor.pt"
+    torch.save(payload, path)
+    assert read_checkpoint(path, torch.device("cpu"))["n_actions"] == 27

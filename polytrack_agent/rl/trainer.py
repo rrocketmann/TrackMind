@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -17,52 +16,33 @@ from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.checkpoint import save_checkpoint
 from polytrack_agent.rl.grpo import group_advantages, grpo_update
-from polytrack_agent.rl.model import TokenActorCritic
-from polytrack_agent.rl.tokens import encode_frame, stack_history
+from polytrack_agent.rl.model import StateActorCritic
+from polytrack_agent.rl.state import LapNumbers, obs_dim
 
 log = logging.getLogger(__name__)
 
 
-def _meta(cfg: dict, encoder, model: TokenActorCritic, keys: list[str]) -> dict:
-    image = encoder.image_size
-    pool = getattr(encoder, "pool_hw", None) or cfg["train"].get("pool") or [4, 6]
+def _meta(model: StateActorCritic, keys: list[str]) -> dict:
     return {
-        "dino_model": str(getattr(encoder, "model_id", None) or cfg["train"].get("dino_model")),
-        "image_size": [int(image[0]), int(image[1])],
-        "pool": [int(pool[0]), int(pool[1])],
-        "feature_dim": int(model.feature_dim),
-        "n_tokens": int(model.n_tokens),
-        "stack": int(model.stack),
+        "obs_dim": int(model.obs_dim),
+        "hidden": int(model.hidden),
         "n_actions": int(model.n_actions),
-        "transformer_layers": int(model.layers),
-        "transformer_heads": int(model.heads),
         "keys": list(keys),
     }
-
-
-def _build_encoder(cfg: dict, device: torch.device):
-    from polytrack_agent.policy.dinov3 import FrozenDinoEncoder
-
-    train_cfg = cfg["train"]
-    image = (int(train_cfg["image_size"][0]), int(train_cfg["image_size"][1]))
-    pool = train_cfg.get("pool") or [4, 6]
-    model_id = str(train_cfg.get("dino_model") or "facebook/dinov3-vits16-pretrain-lvd1689m")
-    encoder = FrozenDinoEncoder(model_id, image, (int(pool[0]), int(pool[1]))).to(device)
-    return encoder.prepare_inference()
 
 
 def train_grpo(
     cfg: dict,
     reference: Path | None = None,
-    encoder=None,
     env: PolyTrackVisionEnv | None = None,
     max_updates: int | None = None,
 ) -> dict:
     """Drive Chromium and update the actor from a group of real laps.
 
-    Pass `encoder` and `env` only from tests. A real run opens polytrack.dev
-    in Chromium when that window is not already up, then builds the frozen
-    DINOv3 encoder. A reference lap is required.
+    The actor sees lap numbers only: progress, its change, match confidence,
+    time, stall, and the previous chord. The reference lap is the progress
+    sensor. Pass `env` only from tests. A real run opens polytrack.dev in
+    Chromium when that window is not already up. A reference lap is required.
     """
     rl_cfg = cfg["rl"]
     device = resolve_device(str(rl_cfg.get("device") or "auto"))
@@ -79,17 +59,11 @@ def train_grpo(
         ensure_chromium_window(cfg)
         progress = load_reference(Path(reference), cfg["progress"])
         env = PolyTrackVisionEnv(cfg, dry_run=False, progress=progress)
-    if encoder is None:
-        encoder = _build_encoder(cfg, device)
-    stack = int(rl_cfg.get("stack") or cfg["train"]["stack"])
-    model = TokenActorCritic(
-        feature_dim=int(encoder.hidden_size),
-        n_tokens=int(encoder.n_tokens),
-        stack=stack,
-        n_actions=n_actions(env.keys),
-        layers=int(rl_cfg.get("transformer_layers") or 2),
-        heads=int(rl_cfg.get("transformer_heads") or 6),
-        dropout=0.0,
+    chords = n_actions(env.keys)
+    model = StateActorCritic(
+        obs_dim=obs_dim(chords),
+        n_actions=chords,
+        hidden=int(rl_cfg.get("hidden") or 128),
     ).to(device)
     model.eval()
     policy_params = [param for name, param in model.named_parameters() if not name.startswith("value")]
@@ -99,14 +73,14 @@ def train_grpo(
     settle = float(rl_cfg.get("finish_settle_s") or 0.0)
     out_dir = Path(rl_cfg.get("out_dir") or "runs/grpo")
     out_dir.mkdir(parents=True, exist_ok=True)
-    meta = _meta(cfg, encoder, model, env.keys)
+    meta = _meta(model, env.keys)
 
-    history: deque = deque(maxlen=stack)
+    numbers = LapNumbers(chords)
     rows: list[dict] = []
-    obs = env.reset(restart=True)
+    env.reset(restart=True)
     updates = 0
     best_progress = -1.0
-    stored_tokens: list[np.ndarray] = []
+    stored_obs: list[np.ndarray] = []
     stored_actions: list[int] = []
     stored_logp: list[float] = []
     stored_progress: list[float] = []
@@ -132,11 +106,11 @@ def train_grpo(
             raise RuntimeError(
                 f"GRPO group has {advantages.shape[0]} advantages and {len(stored_actions)} decisions"
             )
-        tokens = torch.from_numpy(np.stack(stored_tokens).astype(np.float32)).to(device)
+        observations = torch.from_numpy(np.stack(stored_obs).astype(np.float32)).to(device)
         stats = grpo_update(
             model,
             optimizer,
-            tokens,
+            observations,
             torch.tensor(stored_actions, dtype=torch.int64, device=device),
             torch.tensor(stored_logp, dtype=torch.float32, device=device),
             torch.tensor(advantages, dtype=torch.float32, device=device),
@@ -164,7 +138,7 @@ def train_grpo(
             best_progress = mean_progress
             save_checkpoint(out_dir / "best.pt", model, {**meta, "update": updates, "progress": mean_progress})
         rows.append({"update": updates, **stats, "progress": mean_progress, "return": mean_return})
-        stored_tokens.clear()
+        stored_obs.clear()
         stored_actions.clear()
         stored_logp.clear()
         stored_progress.clear()
@@ -173,17 +147,15 @@ def train_grpo(
 
     try:
         while max_updates is None or updates < max_updates:
-            token = encode_frame(encoder, obs[-1], device)
-            stacked = stack_history(history, token, stack).unsqueeze(0).to(device)
+            observation = torch.from_numpy(numbers.vector()).unsqueeze(0).to(device)
             with torch.no_grad():
-                action, logp, _value = model.act(stacked, unimix=unimix, greedy=False)
+                action, logp, _value = model.act(observation, unimix=unimix, greedy=False)
             action_id = int(action.item())
-            obs, reward, done, info = env.step(action_id)
+            _frame, reward, done, info = env.step(action_id)
             if not info.get("counted", False):
-                if history:
-                    history.pop()
                 continue
-            stored_tokens.append(stacked.squeeze(0).cpu().numpy().astype(np.float16))
+            stored_obs.append(numbers.vector())
+            numbers.advance(info, action_id)
             stored_actions.append(action_id)
             stored_logp.append(float(logp.item()))
             stored_progress.append(float(info.get("progress") or 0.0))
@@ -203,8 +175,8 @@ def train_grpo(
                     )
                     time.sleep(settle)
                 restart = not bool(info.get("restarted"))
-                history.clear()
-                obs = env.reset(restart=restart)
+                numbers.reset()
+                env.reset(restart=restart)
                 if len(episode_returns) >= group_size:
                     flush()
     except KeyboardInterrupt:

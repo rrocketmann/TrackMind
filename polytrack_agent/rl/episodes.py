@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import logging
 import time
-from collections import deque
 from pathlib import Path
 
 import torch
@@ -13,10 +12,9 @@ import torch
 from polytrack_agent.env import PolyTrackVisionEnv
 from polytrack_agent.obs.progress import load_reference
 from polytrack_agent.policy.cnn import resolve_device
-from polytrack_agent.policy.dinov3 import FrozenDinoEncoder
 from polytrack_agent.rl.device import configure_torch
-from polytrack_agent.rl.checkpoint import load_actor, read_checkpoint
-from polytrack_agent.rl.tokens import encode_frame, stack_history
+from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpoint
+from polytrack_agent.rl.state import LapNumbers
 
 log = logging.getLogger(__name__)
 
@@ -32,15 +30,8 @@ def run_episodes(
     device = resolve_device(str(cfg["rl"].get("device") or cfg["play"].get("device") or "auto"))
     configure_torch(device)
     payload = read_checkpoint(Path(checkpoint), device)
+    cfg = bind_runtime(cfg, payload)
     model = load_actor(payload, device)
-    image = (int(payload["image_size"][0]), int(payload["image_size"][1]))
-    pool = payload.get("pool") or [4, 6]
-    encoder = FrozenDinoEncoder(
-        str(payload["dino_model"]),
-        image,
-        (int(pool[0]), int(pool[1])),
-    ).to(device)
-    encoder.prepare_inference()
     if reference is None:
         raise FileNotFoundError("Episode runs need a reference lap (play.reference or --reference).")
     progress = load_reference(Path(reference), cfg["progress"])
@@ -49,7 +40,7 @@ def run_episodes(
 
         ensure_chromium_window(cfg)
     env = PolyTrackVisionEnv(cfg, dry_run=dry_run, progress=progress)
-    stack = int(payload["stack"])
+    numbers = LapNumbers(int(payload["n_actions"]))
     settle = float(cfg["rl"].get("finish_settle_s") or 0.0)
     rows: list[dict] = []
     log.info(
@@ -58,20 +49,21 @@ def run_episodes(
     )
     try:
         for episode in range(1, int(episodes) + 1):
-            history: deque = deque(maxlen=stack)
-            obs = env.reset(restart=not dry_run)
+            numbers.reset()
+            env.reset(restart=not dry_run)
             started = time.perf_counter()
             finished = False
             max_progress = 0.0
             info: dict = {}
             while True:
-                token = encode_frame(encoder, obs[-1], device)
-                stacked = stack_history(history, token, stack).unsqueeze(0)
+                observation = torch.from_numpy(numbers.vector()).unsqueeze(0).to(device)
                 with torch.no_grad():
-                    action, _logp, _value = model.act(stacked, greedy=True)
-                obs, _reward, done, info = env.step(int(action.item()))
+                    action, _logp, _value = model.act(observation, greedy=True)
+                action_id = int(action.item())
+                _frame, _reward, done, info = env.step(action_id)
                 if not info.get("counted", False):
                     continue
+                numbers.advance(info, action_id)
                 max_progress = max(max_progress, float(info.get("progress") or 0.0))
                 if done:
                     finished = bool(info.get("finished"))

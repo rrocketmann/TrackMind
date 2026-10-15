@@ -2,7 +2,7 @@
 
 A vision-only controller for the **official** PolyTrack window at [polytrack.dev](https://polytrack.dev) or [kodub.itch.io/polytrack](https://kodub.itch.io/polytrack). It captures the screen and presses keys. It does not fork the game, read its memory, scrape the page, or open its sockets.
 
-The policy is GRPO on a frozen [DINOv3](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m) ViT-S/16 plus a small temporal transformer. DINOv3 turns each frame into a patch grid. The temporal transformer reads a short stack of those grids and picks one of 27 key holds. A group of real laps is scored together, and each lap is judged against the others in that group. There is no behavioral cloning and no world model.
+The policy is GRPO on lap numbers: progress along a reference lap, how much that progress just moved, how sure the match is, time, stall, and the previous key chord. It picks one of 27 key holds. It does not see the picture. A group of real laps is scored together, and each lap is judged against the others in that group. The picture is only the progress sensor.
 
 The game is the official site in Chromium, `https://polytrack.dev`. Train and play look for a Chromium window titled PolyTrack and open that URL in your normal Chromium profile when it is not already open. That profile is what carries the nickname, so a real finish can be submitted by the game.
 
@@ -92,7 +92,7 @@ Load Summer 1 in the official window, build a reference lap, then:
 python scripts/train.py --config config.local.yaml --reference data/summer1-reference.npz
 ```
 
-The first run downloads DINOv3 ViT-S/16 (about 86 MB). The ViT stays frozen. The RTX 3050 in the custom PC has 8 GB: on that card the ViT loads in float16, and PyTorch keeps about 2 GB free so Chromium can draw the game. This laptop has no 3050, so `device: auto` stays on CPU here and uses the desktop card when you train on that PC. GRPO drives groups of 8 laps, about 10 decisions per second, and the actor update is the small temporal transformer only. Checkpoints go to `runs/grpo/`. `best.pt` stores the actor and the DINOv3 model id.
+GRPO drives groups of 8 laps, about 10 decisions per second, and the actor update is the small numeric policy only. Checkpoints go to `runs/grpo/`. `best.pt` stores that actor. `device: auto` uses CUDA when a GPU is present and CPU otherwise. The RTX 3050 in the custom PC has 8 GB, and this laptop has no 3050, so training stays on CPU here.
 
 The agent taps `R` between episodes. After a finish it releases the driving keys and waits `rl.finish_settle_s` (3 seconds) before restarting, so Chromium can submit the recording. Keep that Chromium window focused. Ctrl+C releases every key and exits.
 
@@ -142,7 +142,7 @@ python scripts/play.py --config config.local.yaml --checkpoint runs/grpo/best.pt
 
 `play.mode` defaults to `discrete`: a key presses above `threshold_on` (0.62) and releases below `threshold_off` (0.38). Opposite steer, throttle, and air keys cannot be held together. `continuous` duty-cycles a key for part of the 30 Hz tick. PolyTrack reads digital keys, and very short taps are easy for the browser to miss, so leave `discrete` on unless you are experimenting.
 
-The loop is grab, then infer, then press, then sleep out the rest of the frame. Live DINOv3 play encodes only the newest frame and keeps the older tokens. A GPU is the practical choice. The small CNN is a few milliseconds on CPU. A fixed capture region avoids extra window lookups.
+A GRPO checkpoint reads the lap numbers and presses one chord. It does not run a vision network. A vision checkpoint still grabs a frame, infers, and turns per-key probabilities into holds. The small CNN is a few milliseconds on CPU. A fixed capture region avoids extra window lookups.
 
 ## Config
 

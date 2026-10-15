@@ -93,6 +93,7 @@ class PolyTrackVisionEnv:
     def _step_id(self, action_id: int):
         mask = mask_for(action_id, self.keys)
         total = 0.0
+        total_dt = 0.0
         done = False
         info = self._info_shell()
         obs = self._last_obs
@@ -101,9 +102,11 @@ class PolyTrackVisionEnv:
             if not info["counted"]:
                 return obs, 0.0, False, info
             total += reward
+            total_dt += float(info.get("dt") or 0.0)
             if done:
                 break
         info["reward"] = total
+        info["dt"] = total_dt
         return obs, float(total), bool(done), info
 
     def _step_once(self, values: np.ndarray):
@@ -149,6 +152,7 @@ class PolyTrackVisionEnv:
             "focused": True,
             "counted": True,
             "stuck": bool(stuck),
+            "dt": float(dt),
             "timeout": bool(timeout),
             "vision": True,
             "keys": self.keys,
@@ -164,6 +168,7 @@ class PolyTrackVisionEnv:
             "focused": False,
             "counted": False,
             "stuck": False,
+            "dt": 0.0,
             "timeout": False,
             "vision": True,
             "keys": self.keys,
