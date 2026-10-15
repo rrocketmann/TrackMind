@@ -63,16 +63,18 @@ rl:
   finish_settle_s: 3
   stack: 4
   epochs: 4
-  minibatch_size: 128    # the actor is small; a wide batch keeps the 3050 busy for less time
+  minibatch_size: 256
   clip: 0.2
+  gamma: 0.99            # credit reaches about 10 seconds back at 10 decisions/s
+  lam: 0.95
+  value_coef: 0.5
   entropy_coef: 0.01
-  kl_coef: 0.02
   unimix: 0.01
-  group_size: 8         # laps compared inside one GRPO update
+  group_size: 4          # laps collected before one PPO update
+  hidden: 128
   lr: 0.0003
-  transformer_layers: 2
-  transformer_heads: 6
-  device: auto           # CUDA when a 3050 is present; CPU until then
+  resume: true           # continue from runs/grpo/last.pt when the layout matches
+  device: auto
   out_dir: runs/grpo
 
 play:

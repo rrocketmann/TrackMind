@@ -6,6 +6,8 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
+from polytrack_agent.rl.actions import forward_ids
+
 
 def mix_logits(logits: torch.Tensor, unimix: float) -> torch.Tensor:
     """Logits of a distribution mixed with a uniform action prior."""
@@ -34,6 +36,15 @@ class StateActorCritic(nn.Module):
         )
         self.policy = nn.Linear(self.hidden, self.n_actions)
         self.value = nn.Linear(self.hidden, 1)
+
+    def bias_toward_forward(self, keys: list[str]) -> None:
+        """Start more likely to hold throttle, so the first laps actually move."""
+        ids = forward_ids(keys)
+        if not ids:
+            return
+        with torch.no_grad():
+            self.policy.bias.zero_()
+            self.policy.bias[ids] = 1.0
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """`obs` is (B, obs_dim). Returns action logits (B, A) and value (B,)."""

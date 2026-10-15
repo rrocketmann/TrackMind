@@ -1,4 +1,4 @@
-"""Reward from visual progress. GRPO compares laps with this signal."""
+"""Reward from visual progress. PPO scores each step with this signal."""
 
 from __future__ import annotations
 

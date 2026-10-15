@@ -56,3 +56,14 @@ def mask_for(action_id: int, keys: list[str]) -> dict[str, bool]:
 
 def n_actions(keys: list[str]) -> int:
     return len(action_masks(keys))
+
+
+def forward_ids(keys: list[str]) -> list[int]:
+    """Chords that hold throttle and do not brake."""
+    ids = []
+    for index, mask in enumerate(action_masks(keys)):
+        throttle = bool(mask.get("w") or mask.get("up"))
+        brake = bool(mask.get("s") or mask.get("down"))
+        if throttle and not brake:
+            ids.append(index)
+    return ids

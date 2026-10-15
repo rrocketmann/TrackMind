@@ -9,14 +9,15 @@ from polytrack_agent.config import load_config
 from polytrack_agent.env import PolyTrackVisionEnv
 from polytrack_agent.obs.preprocess import rgb_to_tiny_gray
 from polytrack_agent.obs.progress import ReferenceProgress
-from polytrack_agent.rl.actions import action_masks, mask_for
+from polytrack_agent.rl.actions import action_masks, forward_ids, mask_for
 from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpoint
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.grpo import group_advantages, grpo_loss, grpo_update
 from polytrack_agent.rl.model import StateActorCritic
-from polytrack_agent.rl.state import obs_dim
-from polytrack_agent.rl.trainer import train_grpo
+from polytrack_agent.rl.ppo import ppo_update
+from polytrack_agent.rl.state import LapNumbers, obs_dim
+from polytrack_agent.rl.trainer import _episode_gae, train_grpo
 
 
 def test_action_table_is_exclusive():
@@ -144,6 +145,74 @@ def test_grpo_trainer_updates_on_a_fake_window(tmp_path):
         env.close()
     assert report["updates"] == 1
     assert (tmp_path / "run" / "last.pt").is_file()
+
+
+def test_ppo_credits_the_press_that_moves_progress():
+    torch.manual_seed(0)
+    keys = ["w", "a", "s", "d", "q", "e"]
+    masks = action_masks(keys)
+    forward = forward_ids(keys)
+    model = StateActorCritic(obs_dim(27), 27, hidden=64)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    def forward_probability() -> float:
+        observation = torch.from_numpy(LapNumbers(27).vector()).unsqueeze(0)
+        with torch.no_grad():
+            logits, _value = model(observation)
+            probabilities = torch.softmax(logits, dim=-1)[0]
+        return float(probabilities[forward].sum())
+
+    before = forward_probability()
+    for _update in range(10):
+        observations: list[np.ndarray] = []
+        actions: list[int] = []
+        logps: list[float] = []
+        values: list[float] = []
+        rewards: list[float] = []
+        dones: list[float] = []
+        lengths: list[int] = []
+        for _episode in range(8):
+            numbers = LapNumbers(27)
+            progress = 0.0
+            length = 0
+            for _step in range(24):
+                observation = torch.from_numpy(numbers.vector()).unsqueeze(0)
+                with torch.no_grad():
+                    action, logp, value = model.act(observation, unimix=0.01)
+                action_id = int(action.item())
+                delta = 0.08 if masks[action_id]["w"] else -0.01
+                progress = float(np.clip(progress + delta, 0.0, 1.0))
+                done = progress >= 0.99
+                observations.append(numbers.vector())
+                actions.append(action_id)
+                logps.append(float(logp.item()))
+                values.append(float(value.item()))
+                rewards.append(delta - 0.002)
+                dones.append(1.0 if done else 0.0)
+                numbers.advance({"progress": progress, "confidence": 1.0, "dt": 0.1}, action_id)
+                length += 1
+                if done:
+                    break
+            lengths.append(length)
+        advantages, targets = _episode_gae(rewards, dones, values, lengths, 0.99, 0.95)
+        ppo_update(
+            model,
+            optimizer,
+            torch.from_numpy(np.stack(observations)),
+            torch.tensor(actions),
+            torch.tensor(logps),
+            torch.tensor(advantages),
+            torch.tensor(targets),
+            epochs=4,
+            minibatch_size=64,
+            clip=0.2,
+            entropy_coef=0.01,
+            value_coef=0.5,
+            unimix=0.01,
+        )
+    after = forward_probability()
+    assert after > before + 0.1
+    assert after > 0.45
 
 
 def test_loaded_actor_presses_a_legal_chord(tmp_path):

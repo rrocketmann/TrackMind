@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the GRPO policy in the official Chromium window."""
+"""Train the PPO policy in the official Chromium window."""
 
 import sys
 from pathlib import Path
