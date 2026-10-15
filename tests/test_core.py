@@ -12,6 +12,7 @@ from polytrack_agent.env import PolyTrackVisionEnv
 from polytrack_agent.input.keys import key_name
 from polytrack_agent.obs.preprocess import FrameStack, bgra_to_rgb, resize_nn
 from polytrack_agent.obs.preprocess import rgb_to_tiny_gray as tiny_gray
+from polytrack_agent.obs.checkpoint import CheckpointProgress
 from polytrack_agent.obs.progress import ProgressState, ReferenceProgress, rgb_to_tiny_gray
 from polytrack_agent.policy.cnn import DrivingPolicy
 from polytrack_agent.policy.control import Controller
@@ -155,6 +156,36 @@ def test_progress_follows_then_restarts_and_finishes():
         restarted = restarted or state.restarted
     assert restarted
     assert state.index == 0
+
+
+def _gate_frame(height: int, width: int, box: tuple[int, int, int, int]) -> np.ndarray:
+    frame = np.full((height, width, 3), 24, dtype=np.uint8)
+    top, bottom, left, right = box
+    frame[top:bottom, left:right] = (255, 210, 16)
+    return frame
+
+
+def test_checkpoint_reward_grows_as_the_gate_gets_closer():
+    sensor = CheckpointProgress()
+    reward = RewardTracker(progress_scale=1.0, time_penalty=0.0, monotonic=False)
+    far = sensor.update(_gate_frame(96, 160, (40, 52, 70, 90)))
+    far_reward, done = reward.step(far, dt=0.0)
+    assert not done and far_reward > 0.0
+    near = sensor.update(_gate_frame(96, 160, (28, 70, 50, 110)))
+    near_reward, done = reward.step(near, dt=0.0)
+    assert not done and near_reward > 0.0
+    assert near.progress > far.progress
+    away = sensor.update(_gate_frame(96, 160, (42, 50, 76, 86)))
+    away_reward, _done = reward.step(away, dt=0.0)
+    assert away_reward < 0.0
+
+
+def test_checkpoint_pass_counts_one_gate():
+    sensor = CheckpointProgress()
+    sensor.update(_gate_frame(96, 160, (20, 78, 30, 130)))
+    state = sensor.update(_gate_frame(96, 160, (0, 1, 0, 1)))
+    assert state.index == 1
+    assert state.progress >= 1.0
 
 
 def test_reward_is_monotonic_until_restart():

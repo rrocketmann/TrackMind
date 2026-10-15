@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 from polytrack_agent.env import PolyTrackVisionEnv
-from polytrack_agent.obs.progress import load_reference
+from polytrack_agent.obs.checkpoint import CheckpointProgress
 from polytrack_agent.policy.cnn import resolve_device
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpoint
@@ -32,9 +32,9 @@ def run_episodes(
     payload = read_checkpoint(Path(checkpoint), device)
     cfg = bind_runtime(cfg, payload)
     model = load_actor(payload, device)
-    if reference is None:
-        raise FileNotFoundError("Episode runs need a reference lap (play.reference or --reference).")
-    progress = load_reference(Path(reference), cfg["progress"])
+    if reference is not None:
+        log.info("Ignoring reference %s. Reward is closeness to the checkpoint gate.", reference)
+    progress = CheckpointProgress.from_config(cfg)
     if not dry_run:
         from polytrack_agent.capture.launch import ensure_chromium_window
 

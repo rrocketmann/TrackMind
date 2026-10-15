@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 
+from polytrack_agent.obs.checkpoint import CheckpointProgress
 from polytrack_agent.obs.preprocess import FrameStack
 from polytrack_agent.obs.progress import NullProgress
 from polytrack_agent.reward import RewardTracker
@@ -35,6 +36,7 @@ class PolyTrackVisionEnv:
             time_penalty=float(reward_cfg["time_penalty"]),
             restart_penalty=float(reward_cfg["restart_penalty"]),
             finish_bonus=float(reward_cfg["finish_bonus"]),
+            monotonic=not isinstance(self.progress, CheckpointProgress),
         )
         self.restart_hook = restart_hook
         rl_cfg = cfg.get("rl") or {}
@@ -76,7 +78,8 @@ class PolyTrackVisionEnv:
     def _wait_for_start(self) -> None:
         probe = getattr(self.progress, "start_similarity", None)
         if probe is None:
-            raise RuntimeError("Restart needs a reference lap so the start line can be seen")
+            time.sleep(min(0.4, self.reset_timeout_s))
+            return
         deadline = time.perf_counter() + self.reset_timeout_s
         while time.perf_counter() < deadline:
             frame = self.runtime.grab()

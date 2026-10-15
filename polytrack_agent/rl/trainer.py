@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from polytrack_agent.env import PolyTrackVisionEnv
-from polytrack_agent.obs.progress import load_reference
+from polytrack_agent.obs.checkpoint import CheckpointProgress
 from polytrack_agent.policy.cnn import resolve_device
 from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint, save_checkpoint
@@ -96,9 +96,10 @@ def train_ppo(
     """Drive Chromium and update the actor from a group of real laps.
 
     The actor sees lap numbers only. Each press is scored with its own
-    advantage from the value head. The reference lap is the progress sensor.
+    advantage from the value head. The score is how close the car is to the
+    next yellow checkpoint gate, plus one for each gate it drives through.
     Pass `env` only from tests. A real run opens polytrack.dev in Chromium
-    when that window is not already up. A reference lap is required.
+    when that window is not already up.
     `runs/ppo/last.pt` is loaded when it matches this actor.
     """
     rl_cfg = cfg["rl"]
@@ -107,14 +108,12 @@ def train_ppo(
     log.info("PPO device %s (%s)", device, hardware)
     own_env = env is None
     if env is None:
-        if reference is None or not Path(reference).is_file():
-            raise FileNotFoundError(
-                "Training needs a reference lap of the track (play.reference or --reference)."
-            )
         from polytrack_agent.capture.launch import ensure_chromium_window
 
         ensure_chromium_window(cfg)
-        progress = load_reference(Path(reference), cfg["progress"])
+        if reference is not None:
+            log.info("Ignoring reference %s. Reward is closeness to the checkpoint gate.", reference)
+        progress = CheckpointProgress.from_config(cfg)
         env = PolyTrackVisionEnv(cfg, dry_run=False, progress=progress)
     chords = n_actions(env.keys)
     hidden = int(rl_cfg.get("hidden") or 128)

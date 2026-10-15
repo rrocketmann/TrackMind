@@ -2,7 +2,7 @@
 
 A vision-only controller for the **official** PolyTrack window at [polytrack.dev](https://polytrack.dev) or [kodub.itch.io/polytrack](https://kodub.itch.io/polytrack). It captures the screen and presses keys. It does not fork the game, read its memory, scrape the page, or open its sockets.
 
-The policy is PPO on lap numbers: progress along a reference lap, the last few progress changes, how sure the match is, time, stall, and the previous key chord. It picks one of 27 key holds. It does not see the picture. A value head gives each press its own advantage. The picture is only the progress sensor.
+The policy is PPO on lap numbers: checkpoints passed, how close the next yellow gate looks, the last few changes in that score, time, stall, and the previous key chord. It picks one of 27 key holds. It does not see the picture. A value head gives each press its own advantage. The picture is only used to see the checkpoint gate.
 
 The game is the official site in Chromium, `https://polytrack.dev`. Train and play look for a Chromium window titled PolyTrack and open that URL in your normal Chromium profile when it is not already open. That profile is what carries the nickname, so a real finish can be submitted by the game.
 
@@ -86,17 +86,17 @@ Arrow keys, or `space` if your build actually uses it, go in `record.keys`. Do n
 
 ## Train
 
-Load Summer 1 in the official window, build a reference lap, then:
+Load a track in the official window, then:
 
 ```bash
-python scripts/train.py --config config.local.yaml --reference data/summer1-reference.npz
+python scripts/train.py --config config.local.yaml
 ```
 
 PPO collects 4 laps, about 10 decisions per second, then updates the numeric actor and the value head. Checkpoints go to `runs/ppo/`. `last.pt` is resumed on the next run when the observation layout matches, and `best.pt` is the highest mean progress. `runs/ppo/log.csv` is the update log. `device: auto` uses CUDA when a GPU is present and CPU otherwise. The RTX 3050 in the custom PC has 8 GB, and this laptop has no 3050, so training stays on CPU here.
 
 The agent taps `R` between episodes. After a finish it releases the driving keys and waits `rl.finish_settle_s` (3 seconds) before restarting, so Chromium can submit the recording. Keep that Chromium window focused. Ctrl+C releases every key and exits.
 
-One reference video is required. It is the progress sensor, not a set of action labels. Record one clean Summer 1 lap, then `scripts/make_reference.py`.
+No reference lap is required. The reward goes up as the yellow checkpoint gate gets closer, and by one more when the car drives through it. Driving away from the gate is a negative reward.
 
 ## Offline agreement
 
