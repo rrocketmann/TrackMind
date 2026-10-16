@@ -5,7 +5,7 @@ capture:
   backend: auto          # auto | mss | dxcam (dxcam is Windows-only)
   monitor: 1             # mss index; 1 is the first real display
   browser: chromium      # capture this browser, not an editor or a local file
-  url: https://polytrack.dev
+  url: https://www.kodub.com/apps/polytrack
   window_title: PolyTrack
   follow_window: true    # ignored when region is set
   geometry_refresh_s: 0.5

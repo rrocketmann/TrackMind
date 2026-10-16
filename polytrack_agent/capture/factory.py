@@ -10,7 +10,7 @@ from typing import Any
 from polytrack_agent.capture.dxcam_capture import DxcamCapture
 from polytrack_agent.capture.mss_capture import MssCapture
 from polytrack_agent.capture.region import Rect
-from polytrack_agent.capture.window import find_window, list_monitors, origin_for_rect
+from polytrack_agent.capture.window import find_window, find_window_id, list_monitors, origin_for_rect
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +77,17 @@ def make_capture(cfg: dict[str, Any]):
                 output_idx=int(cfg["capture"].get("dxcam_output") or 0),
             )
     if backend == "mss":
+        # A root-window grab is black for an XWayland Chromium window. Read that
+        # window's own pixels when we know which one it is.
+        if sys.platform.startswith("linux") and not cfg["capture"].get("region"):
+            title = str(cfg["capture"].get("window_title") or "PolyTrack")
+            browser = str(cfg["capture"].get("browser") or "") or None
+            window_id = find_window_id(title, browser)
+            if window_id is not None:
+                from polytrack_agent.capture.x11_window import X11WindowCapture
+
+                log.info("Capturing X11 window %s directly.", hex(window_id))
+                return X11WindowCapture(window_id, region)
         return MssCapture(region)
     raise RuntimeError(f"Unknown capture backend {backend!r}")
 
@@ -133,12 +144,9 @@ class FocusGate:
         current = active_window_title()
         if current is None:
             if not self._warned:
-                log.warning(
-                    "Cannot read the active window title (xdotool missing, or no X11 session). "
-                    "The focus gate is off, so keys will be sent whenever the agent runs."
-                )
+                log.warning("Cannot read the active window title. Keys stay released.")
                 self._warned = True
-            self._ok = True
+            self._ok = False
         else:
             self._ok = self.title in current.lower()
         return self._ok

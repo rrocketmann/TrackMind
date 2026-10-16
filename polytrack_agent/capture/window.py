@@ -6,6 +6,7 @@ Geometry is queried from the window manager. Nothing is injected into the game.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import sys
 from typing import Iterable
@@ -119,6 +120,36 @@ def origin_for_rect(rect: Rect) -> tuple[int, int]:
     return (0, 0)
 
 
+def find_window_id(title: str, browser: str | None = None) -> int | None:
+    """X11 window id of the game window, or None when it is not open."""
+    if sys.platform == "win32":
+        return None
+    needle = title.lower()
+    browser_name = (browser or "").lower().strip()
+    best_id = None
+    best_area = -1
+    official_id = None
+    official_area = -1
+    for wid in _xprop_ids("_NET_CLIENT_LIST"):
+        name = _xprop_name(wid)
+        if needle not in name.lower():
+            continue
+        wm_class = _xprop_class(wid)
+        if browser_name and not _class_matches(wm_class, browser_name):
+            continue
+        rect = _x_geometry(wid)
+        if rect is None:
+            continue
+        area = rect.width * rect.height
+        if area > best_area:
+            best_id = int(wid, 16)
+            best_area = area
+        if "polytrack-official" in wm_class.lower() and area > official_area:
+            official_id = int(wid, 16)
+            official_area = area
+    return official_id if official_id is not None else best_id
+
+
 def find_window(title: str, browser: str | None = None) -> Rect | None:
     ensure_dpi_aware()
     browser_name = (browser or "").lower().strip() or None
@@ -131,11 +162,20 @@ def find_window(title: str, browser: str | None = None) -> Rect | None:
         classed = _windows_xdotool_class(browser_name, title)
         if classed:
             return pick_game_window(classed, title, browser_name)
+        classed = _windows_xprop()
+        if classed:
+            return pick_game_window(classed, title, browser_name)
         return None
     found = _find_window_xdotool(title)
     if found is not None:
         return found
-    return _find_window_wmctrl(title)
+    found = _find_window_wmctrl(title)
+    if found is not None:
+        return found
+    classed = _windows_xprop()
+    if not classed:
+        return None
+    return pick_largest([(name, rect) for name, _klass, rect in classed], title)
 
 
 def active_window_title() -> str | None:
@@ -149,9 +189,14 @@ def active_window_title() -> str | None:
             stderr=subprocess.DEVNULL,
         )
     except (OSError, subprocess.CalledProcessError):
-        return None
+        out = ""
     title = out.strip()
-    return title or None
+    if title:
+        return title
+    ids = _xprop_ids("_NET_ACTIVE_WINDOW")
+    if not ids:
+        return None
+    return _xprop_name(ids[0]) or None
 
 
 def _find_window_xdotool(title: str) -> Rect | None:
@@ -209,6 +254,121 @@ def _windows_wmctrl() -> list[tuple[str, str, Rect]]:
             windows.append((name, wm_class, Rect(int(x), int(y), int(width), int(height))))
         except ValueError:
             continue
+    return windows
+
+
+def _xprop_ids(prop: str) -> list[str]:
+    try:
+        text = subprocess.check_output(["xprop", "-root", prop], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return re.findall(r"0x[0-9a-fA-F]+", text)
+
+
+def _xprop_name(wid: str) -> str:
+    try:
+        text = subprocess.check_output(["xprop", "-id", wid, "WM_NAME"], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    match = re.search(r'WM_NAME\([^)]*\) = "(.*)"', text)
+    if match:
+        return match.group(1)
+    match = re.search(r"WM_NAME\([^)]*\) = (.*)", text)
+    return match.group(1).strip() if match else ""
+
+
+def _xprop_class(wid: str) -> str:
+    try:
+        text = subprocess.check_output(["xprop", "-id", wid, "WM_CLASS"], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    parts = re.findall(r'"([^"]*)"', text)
+    return " ".join(parts)
+
+
+def _x_geometry(wid: str) -> Rect | None:
+    import ctypes
+
+    lib = ctypes.CDLL("libX11.so.6")
+    lib.XOpenDisplay.restype = ctypes.c_void_p
+    lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    lib.XDefaultRootWindow.restype = ctypes.c_ulong
+    lib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    lib.XGetGeometry.restype = ctypes.c_int
+    lib.XGetGeometry.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+    ]
+    lib.XTranslateCoordinates.restype = ctypes.c_int
+    lib.XTranslateCoordinates.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    display = lib.XOpenDisplay(None)
+    if not display:
+        return None
+    try:
+        root = lib.XDefaultRootWindow(display)
+        root_ret = ctypes.c_ulong()
+        x = ctypes.c_int()
+        y = ctypes.c_int()
+        width = ctypes.c_uint()
+        height = ctypes.c_uint()
+        border = ctypes.c_uint()
+        depth = ctypes.c_uint()
+        window = int(wid, 16)
+        ok = lib.XGetGeometry(
+            display,
+            ctypes.c_ulong(window),
+            ctypes.byref(root_ret),
+            ctypes.byref(x),
+            ctypes.byref(y),
+            ctypes.byref(width),
+            ctypes.byref(height),
+            ctypes.byref(border),
+            ctypes.byref(depth),
+        )
+        if not ok or int(width.value) <= 0 or int(height.value) <= 0:
+            return None
+        rx = ctypes.c_int()
+        ry = ctypes.c_int()
+        child = ctypes.c_ulong()
+        lib.XTranslateCoordinates(
+            display,
+            ctypes.c_ulong(window),
+            root,
+            0,
+            0,
+            ctypes.byref(rx),
+            ctypes.byref(ry),
+            ctypes.byref(child),
+        )
+        return Rect(int(rx.value), int(ry.value), int(width.value), int(height.value))
+    finally:
+        lib.XCloseDisplay(display)
+
+
+def _windows_xprop() -> list[tuple[str, str, Rect]]:
+    windows: list[tuple[str, str, Rect]] = []
+    for wid in _xprop_ids("_NET_CLIENT_LIST"):
+        rect = _x_geometry(wid)
+        if rect is None:
+            continue
+        windows.append((_xprop_name(wid), _xprop_class(wid), rect))
     return windows
 
 

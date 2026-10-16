@@ -1,10 +1,10 @@
 # PolyTrack vision agent
 
-A vision-only controller for the **official** PolyTrack window at [polytrack.dev](https://polytrack.dev) or [kodub.itch.io/polytrack](https://kodub.itch.io/polytrack). It captures the screen and presses keys. It does not fork the game, read its memory, scrape the page, or open its sockets.
+A vision-only controller for the **official** PolyTrack window at [kodub.com/apps/polytrack](https://www.kodub.com/apps/polytrack). It captures the screen and presses keys. It does not fork the game, read its memory, scrape the page, or open its sockets.
 
 The policy is PPO on lap numbers: checkpoints passed, how close the next yellow gate looks, the last few changes in that score, time, stall, and the previous key chord. It picks one of 27 key holds. It does not see the picture. A value head gives each press its own advantage. The picture is only used to see the checkpoint gate.
 
-The game is the official site in Chromium, `https://polytrack.dev`. Train and play look for a Chromium window titled PolyTrack and open that URL in your normal Chromium profile when it is not already open. That profile is what carries the nickname, so a real finish can be submitted by the game.
+The game is the official page in Chromium, `https://www.kodub.com/apps/polytrack`. Play looks for a Chromium window titled PolyTrack and opens that URL when it is not already open.
 
 Air pitch and roll in stock PolyTrack reuse WASD while the car is airborne. `q` and `e` are optional extra outputs for a custom bind.
 
@@ -37,7 +37,7 @@ python -m pytest
 Chromium is opened for you if it is not already on the game:
 
 ```bash
-chromium --app=https://polytrack.dev --class=polytrack-official
+chromium --app=https://www.kodub.com/apps/polytrack --class=polytrack-official
 ```
 
 Use a borderless or fullscreen app window so the capture is the game, not the browser toolbar. Stay logged in with a nickname in that same profile.

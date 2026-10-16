@@ -191,14 +191,13 @@ def cmd_play(cfg: dict, args) -> int:
         reference = Path(cfg["play"]["reference"])
     log_path = None if args.no_log else Path(cfg["play"]["log"])
     if payload.get("arch") == ARCH:
-        from polytrack_agent.rl.episodes import run_episodes
+        from polytrack_agent.rl.episodes import run_chromium
 
         episodes = 5 if args.episodes is None else int(args.episodes)
-        run_episodes(
+        run_chromium(
             cfg,
             checkpoint=checkpoint,
             episodes=episodes,
-            dry_run=bool(args.dry_run),
             reference=reference,
             log_path=log_path,
         )
