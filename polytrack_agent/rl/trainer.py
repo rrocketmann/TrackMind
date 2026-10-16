@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from polytrack_agent.env import PolyTrackVisionEnv
-from polytrack_agent.obs.checkpoint import CheckpointProgress
+from polytrack_agent.rl.headless import HeadlessTrack
 from polytrack_agent.policy.cnn import resolve_device
 from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint, save_checkpoint
@@ -96,11 +96,9 @@ def train_ppo(
     """Drive Chromium and update the actor from a group of real laps.
 
     The actor sees lap numbers only. Each press is scored with its own
-    advantage from the value head. The score is how close the car is to the
-    next yellow checkpoint gate, plus one for each gate it drives through.
-    Pass `env` only from tests. A real run opens polytrack.dev in Chromium
-    when that window is not already up.
-    `runs/ppo/last.pt` is loaded when it matches this actor.
+    advantage from the value head. The lap is a headless track of checkpoint
+    coordinates, so there is no display and no browser. Pass `env` only from
+    tests. `runs/ppo/last.pt` is loaded when it matches this actor.
     """
     rl_cfg = cfg["rl"]
     device = resolve_device(str(rl_cfg.get("device") or "auto"))
@@ -108,13 +106,8 @@ def train_ppo(
     log.info("PPO device %s (%s)", device, hardware)
     own_env = env is None
     if env is None:
-        from polytrack_agent.capture.launch import ensure_chromium_window
-
-        ensure_chromium_window(cfg)
-        if reference is not None:
-            log.info("Ignoring reference %s. Reward is closeness to the checkpoint gate.", reference)
-        progress = CheckpointProgress.from_config(cfg)
-        env = PolyTrackVisionEnv(cfg, dry_run=False, progress=progress)
+        del reference
+        env = HeadlessTrack(cfg)
     chords = n_actions(env.keys)
     hidden = int(rl_cfg.get("hidden") or 128)
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)

@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--out", type=Path, default=None, help="Directory that will contain session-* folders")
     record.set_defaults(func=cmd_record)
 
-    train = sub.add_parser("train", parents=[common], help="Train the PPO policy in the Chromium window")
+    train = sub.add_parser("train", parents=[common], help="Train the PPO policy on the headless track")
     train.add_argument("--reference", type=Path, default=None, help="reference.npz for the track, default play.reference")
     train.add_argument("--out", type=Path, default=None)
     train.add_argument("--device", default=None)

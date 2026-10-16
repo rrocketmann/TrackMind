@@ -9,9 +9,8 @@ from pathlib import Path
 
 import torch
 
-from polytrack_agent.env import PolyTrackVisionEnv
-from polytrack_agent.obs.checkpoint import CheckpointProgress
 from polytrack_agent.policy.cnn import resolve_device
+from polytrack_agent.rl.headless import HeadlessTrack
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpoint
 from polytrack_agent.rl.state import LapNumbers
@@ -32,25 +31,15 @@ def run_episodes(
     payload = read_checkpoint(Path(checkpoint), device)
     cfg = bind_runtime(cfg, payload)
     model = load_actor(payload, device)
-    if reference is not None:
-        log.info("Ignoring reference %s. Reward is closeness to the checkpoint gate.", reference)
-    progress = CheckpointProgress.from_config(cfg)
-    if not dry_run:
-        from polytrack_agent.capture.launch import ensure_chromium_window
-
-        ensure_chromium_window(cfg)
-    env = PolyTrackVisionEnv(cfg, dry_run=dry_run, progress=progress)
+    del reference, dry_run
+    env = HeadlessTrack(cfg)
     numbers = LapNumbers(int(payload["n_actions"]))
-    settle = float(cfg["rl"].get("finish_settle_s") or 0.0)
     rows: list[dict] = []
-    log.info(
-        "PPO eval, %s episodes, in Chromium at polytrack.dev. A real finish is submitted by the game.",
-        episodes,
-    )
+    log.info("PPO eval, %s headless episodes.", episodes)
     try:
         for episode in range(1, int(episodes) + 1):
             numbers.reset()
-            env.reset(restart=not dry_run)
+            env.reset(restart=True)
             started = time.perf_counter()
             finished = False
             max_progress = 0.0
@@ -69,10 +58,6 @@ def run_episodes(
                     finished = bool(info.get("finished"))
                     break
             seconds = time.perf_counter() - started
-            if finished and not dry_run and settle > 0:
-                env.runtime.release_keys()
-                log.info("Episode %s finished in %.2fs. Waiting %.1fs for the client submit.", episode, seconds, settle)
-                time.sleep(settle)
             row = {
                 "episode": episode,
                 "finished": int(finished),

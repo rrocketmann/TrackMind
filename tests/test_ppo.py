@@ -13,6 +13,7 @@ from polytrack_agent.rl.actions import action_masks, forward_ids, mask_for
 from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpoint
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
+from polytrack_agent.rl.headless import HeadlessTrack
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.ppo import ppo_loss, ppo_update
 from polytrack_agent.rl.state import LapNumbers, obs_dim
@@ -45,6 +46,42 @@ def test_gae_stops_at_done():
     assert abs(float(advantages[0]) - 1.0) < 1e-5
     assert abs(float(advantages[1]) - 5.0) < 1e-5
     assert abs(float(returns[1]) - 5.0) < 1e-5
+
+
+def test_train_ppo_needs_no_display(tmp_path):
+    cfg = load_config(None)
+    cfg["rl"]["out_dir"] = str(tmp_path / "run")
+    cfg["rl"]["group_size"] = 2
+    cfg["rl"]["timeout_s"] = 0.4
+    cfg["rl"]["stuck_s"] = 30
+    cfg["rl"]["epochs"] = 1
+    cfg["rl"]["minibatch_size"] = 4
+    cfg["rl"]["hidden"] = 32
+    cfg["rl"]["device"] = "cpu"
+    cfg["rl"]["finish_settle_s"] = 0
+    report = train_ppo(cfg, max_updates=1)
+    assert report["updates"] == 1
+    assert (tmp_path / "run" / "last.pt").is_file()
+
+
+def test_headless_throttle_closes_on_the_first_gate():
+    cfg = load_config(None)
+    env = HeadlessTrack(cfg)
+    env.reset()
+    forward = forward_ids(env.keys)[0]
+    start = env.x
+    progress = 0.0
+    total = 0.0
+    for _ in range(40):
+        _obs, reward, done, info = env.step(forward)
+        total += reward
+        progress = float(info["progress"])
+        if done:
+            break
+    assert env.x > start
+    assert progress > 0.5
+    assert total > 0.0
+    env.close()
 
 
 def test_cpu_setup_does_not_touch_cuda():

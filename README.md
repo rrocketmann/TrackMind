@@ -86,17 +86,11 @@ Arrow keys, or `space` if your build actually uses it, go in `record.keys`. Do n
 
 ## Train
 
-Load a track in the official window, then:
-
 ```bash
-python scripts/train.py --config config.local.yaml
+python scripts/train.py
 ```
 
-PPO collects 4 laps, about 10 decisions per second, then updates the numeric actor and the value head. Checkpoints go to `runs/ppo/`. `last.pt` is resumed on the next run when the observation layout matches, and `best.pt` is the highest mean progress. `runs/ppo/log.csv` is the update log. `device: auto` uses CUDA when a GPU is present and CPU otherwise. The RTX 3050 in the custom PC has 8 GB, and this laptop has no 3050, so training stays on CPU here.
-
-The agent taps `R` between episodes. After a finish it releases the driving keys and waits `rl.finish_settle_s` (3 seconds) before restarting, so Chromium can submit the recording. Keep that Chromium window focused. Ctrl+C releases every key and exits.
-
-No reference lap is required. The reward goes up as the yellow checkpoint gate gets closer, and by one more when the car drives through it. Driving away from the gate is a negative reward.
+Training is headless. There is no browser, no capture, and no reference lap. The car is a point on a track of checkpoint coordinates. The reward goes up as it gets closer to the next checkpoint and by one more when it reaches that checkpoint. PPO collects 4 laps, then updates the numeric actor and the value head. Checkpoints go to `runs/ppo/`. `last.pt` is resumed on the next run when the observation layout matches, and `best.pt` is the highest mean progress. `runs/ppo/log.csv` is the update log. Ctrl+C stops the run.
 
 ## Offline agreement
 
