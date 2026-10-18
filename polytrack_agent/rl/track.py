@@ -1,4 +1,4 @@
-"""One car in the schoolagy PolyTrack 0.5.2 simulation.
+"""One car in the schoolagy PolyTrack 0.6.3 simulation.
 
 The Node host steps the game's own worker. This class turns a chord into
 up/down/left/right and scores progress from the car state the worker returns.
@@ -23,10 +23,11 @@ def game_root(cfg: dict) -> Path:
         )
     root = Path(raw).expanduser().resolve()
     worker = root / "simulation_worker.bundle.js"
-    if not worker.is_file():
+    wasm = root / "polytrack_physics.wasm"
+    if not worker.is_file() or not wasm.is_file():
         raise FileNotFoundError(
-            f"{root} has no simulation_worker.bundle.js. "
-            "POLYTRACK_ROOT must be the schoolagy polytrack directory."
+            f"{root} is not the PolyTrack 0.6.3 web directory. "
+            "It needs simulation_worker.bundle.js and polytrack_physics.wasm."
         )
     return root
 

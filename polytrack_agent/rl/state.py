@@ -1,4 +1,4 @@
-"""Car-state observation from the PolyTrack 0.5.2 simulation. No pixels."""
+"""Car-state observation from the PolyTrack 0.6.3 simulation. No pixels."""
 
 from __future__ import annotations
 

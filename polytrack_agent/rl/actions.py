@@ -1,4 +1,4 @@
-"""Discrete holds of the 0.5.2 car. Opposite keys never share a mask."""
+"""Discrete holds of the 0.6.3 car. Opposite keys never share a mask."""
 
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ def _named(keyset: set[str], options: tuple[str, ...]) -> str | None:
 def action_masks(keys: list[str]) -> list[dict[str, bool]]:
     """Every legal hold of up/down/left/right, in a stable order.
 
-    PolyTrack 0.5.2 has those four controls. Air pitch and roll reuse them
+    PolyTrack 0.6.3 has those four controls. Air pitch and roll reuse them
     while the car is off the ground, so q and e are not actions.
     """
     keyset = set(keys)
     unknown = sorted(keyset - _ALLOWED)
     if unknown:
         raise ValueError(
-            f"PolyTrack 0.5.2 only accepts {sorted(_ALLOWED)}. Refusing {unknown}."
+            f"PolyTrack 0.6.3 only accepts {sorted(_ALLOWED)}. Refusing {unknown}."
         )
     throttle_axis: list[str | None] = [None]
     steer_axis: list[str | None] = [None]

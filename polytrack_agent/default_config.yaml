@@ -1,5 +1,5 @@
-# PPO on the PolyTrack 0.5.2 simulation that ships in schoolagy.
-# The car is the game's own Ammo worker. It is not the official 0.6 client.
+# PPO on the PolyTrack 0.6.3 web build in schoolagy/polytrack-0.6.3.
+# POLYTRACK_ROOT is that directory. The car is polytrack_physics.wasm.
 
 game:
   root: null             # overridden by POLYTRACK_ROOT or a --config overlay

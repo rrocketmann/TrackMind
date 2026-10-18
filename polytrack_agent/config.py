@@ -41,7 +41,7 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 
 def validate_output_keys(keys: list[str]) -> list[str]:
-    """Normalize driving keys and reject anything the 0.5.2 car does not steer with."""
+    """Normalize driving keys and reject anything the 0.6.3 car does not steer with."""
     normalized = [str(key).lower().strip() for key in keys]
     if not normalized or any(not key for key in normalized):
         raise ValueError("keys must list at least one driving key")
@@ -56,7 +56,7 @@ def validate_output_keys(keys: list[str]) -> list[str]:
     allowed = {"w", "a", "s", "d", "up", "down", "left", "right"}
     extra = [key for key in normalized if key not in allowed]
     if extra:
-        raise ValueError(f"PolyTrack 0.5.2 only has up, down, left, and right. Refusing {extra}.")
+        raise ValueError(f"PolyTrack 0.6.3 only has up, down, left, and right. Refusing {extra}.")
     return normalized
 
 

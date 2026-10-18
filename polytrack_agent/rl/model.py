@@ -1,4 +1,4 @@
-"""Actor-critic over the 0.5.2 car state."""
+"""Actor-critic over the 0.6.3 car state."""
 
 from __future__ import annotations
 

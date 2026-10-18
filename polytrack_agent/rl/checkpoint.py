@@ -12,7 +12,7 @@ from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.state import obs_dim
 
-ARCH = "schoolagy-ppo-v1"
+ARCH = "schoolagy-ppo-0.6.3"
 
 
 def read_checkpoint(path: Path, device: torch.device) -> dict[str, Any]:

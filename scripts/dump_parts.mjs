@@ -205,7 +205,8 @@ const hook = `(() => {
           },
           startOffset: part.startOffset == null ? null : Array.from(part.startOffset),
         }));
-        fetch("/__dump", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(parts) });
+        const collision = message.carCollisionShapeVertices == null ? [] : Array.from(message.carCollisionShapeVertices);
+        fetch("/__dump", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ parts, collision, massOffset: message.carMassOffset }) });
       }
       return orig(message, transfer);
     };

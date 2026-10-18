@@ -1,4 +1,4 @@
-"""Run a fixed number of greedy episodes in the 0.5.2 simulation."""
+"""Run a fixed number of greedy episodes in the 0.6.3 simulation."""
 
 from __future__ import annotations
 

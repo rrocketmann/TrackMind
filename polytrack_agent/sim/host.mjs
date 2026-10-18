@@ -1,11 +1,13 @@
-// Drive the PolyTrack 0.5.2 simulation worker. The worker is the game's own
-// Ammo car. This process only loads it, feeds a track, and steps it.
+// Drive the PolyTrack 0.6.3 simulation worker. The worker steps
+// polytrack_physics.wasm. This process loads it, feeds a track, and reads
+// the car state bytes the worker posts.
 
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MASS_OFFSET = 0.6;
 const PART_SIZE = 5;
@@ -22,16 +24,17 @@ function fail(error) {
 function patchWorker(source) {
   const replacements = [
     [
-      "case X_.CreateCar:",
+      "case Ki.CreateCar:",
       `case 11: {
-        const exported = sw.fromExportString(e.data.trackData);
-        const editor = exported && exported.trackData && exported.trackData.toSaveString ? exported.trackData : null;
-        const save = editor ? editor.toSaveString() : e.data.trackData;
-        const track = sw.fromSaveString(save);
-        if (null == track || null == editor) throw new Error("Failed to load track");
-        const bounds = editor.getBounds();
+        const exported = Ko.fromExportString(r.trackData);
+        const track = exported && exported.trackData;
+        if (null == track || typeof track.toSaveString !== "function") throw new Error("Failed to load track");
+        const save = track.toSaveString();
+        const loaded = Ko.fromSaveString(save);
+        if (null == loaded) throw new Error("Failed to load track");
+        const bounds = track.getBounds();
         const seen = new Set();
-        editor.forEachPart((x, y, z, type, rotation, axis, color, checkpointOrder) => {
+        track.forEachPart((x, y, z, type, rotation, axis, color, checkpointOrder) => {
           if (checkpointOrder != null) seen.add(checkpointOrder);
         });
         postMessage({
@@ -42,59 +45,20 @@ function patchWorker(source) {
         });
         break;
       }
-      case X_.CreateCar:`,
+      case Ki.CreateCar:`,
     ],
     [
-      "const n = Math.max(0, t - s);",
-      "const n = 0;",
+      "const e=Math.max(0,i-a);let r=s.frames+e;",
+      "const e=0;let r=s.frames;",
     ],
     [
-      "let i = r.model.getTime().numberOfFrames + n;",
-      "let i = r.model.getTime().numberOfFrames;",
+      "if(t.frames<Qa.maxFrames&&t.frames<t.targetSimulationFrames&&!t.isPaused){const e=t.controls.getControls(t.frames);i.push(n(t,e)),t.frames++,r=!1}",
+      `if(t.frames<Qa.maxFrames&&t.frames<t.targetSimulationFrames&&!t.isPaused){let controls;if(t.userControls!=null){while(t.userControls.buffer.length>0&&t.userControls.buffer[0].frame<=t.frames){const ctl=t.userControls.buffer.shift();if(ctl!=null){t.userControls.up=ctl.up;t.userControls.right=ctl.right;t.userControls.down=ctl.down;t.userControls.left=ctl.left;t.userControls.reset=ctl.reset}}controls={up:t.userControls.up,right:t.userControls.right,down:t.userControls.down,left:t.userControls.left,reset:t.userControls.reset}}else controls=t.controls.getControls(t.frames);i.push(n(t,controls)),t.frames++,r=!1}`,
     ],
+    ["setInterval(h)", "void 0"],
     [
-      "!e.isPaused && (t.push(a(e)),",
-      `!e.isPaused && ((car => {
-        const frame = car.model.getTime().numberOfFrames;
-        if (car.userControls != null) {
-          while (car.userControls.length > 0 && car.userControls[0].frame <= frame) {
-            const ctl = car.userControls.shift();
-            if (ctl != null) {
-              const controls = car.model.controls;
-              controls.up = ctl.up;
-              controls.right = ctl.right;
-              controls.down = ctl.down;
-              controls.left = ctl.left;
-              controls.reset = ctl.reset;
-            }
-          }
-        }
-      })(e), t.length = 0, t.push(a(e)),`,
-    ],
-    [
-      `} while (Math.max(0, performance.now() - e) / 1e3 < .01 && !i)
-                    }
-                    postMessage({
-                        messageType: X_.UpdateResult,
-                        carStates: t
-                    })`,
-      `} while (Math.max(0, performance.now() - e) / 1e3 < .01 && !i)
-                    }
-                    t.length > 0 && postMessage({
-                        messageType: X_.UpdateResult,
-                        carStates: t
-                    })`,
-    ],
-    ["setInterval(c)", "void 0"],
-    [
-      "cw.length = 0,\n                onmessage = i;",
-      `cw.length = 0,
-                onmessage = (event) => {
-                  try { i(event); }
-                  catch (error) { postMessage({ messageType: -1, error: String(error && error.stack || error) }); }
-                };
-                globalThis.__step = c;
-                postMessage({ messageType: -2 });`,
+      "$o.length=0,onmessage=r;",
+      `$o.length=0,onmessage=(event)=>{try{r(event)}catch(error){postMessage({messageType:-1,error:String(error&&error.stack||error)})}};globalThis.__step=h;postMessage({messageType:-2});`,
     ],
   ];
   let patched = `var onmessage;\nvar postMessage = globalThis.postMessage;\nvar self = globalThis;\n${source}`;
@@ -109,11 +73,10 @@ function patchWorker(source) {
 
 function rngTable(mainBundle) {
   const text = fs.readFileSync(mainBundle, "utf8");
-  const marker = text.indexOf("const MR = SR");
-  const valueAt = text.lastIndexOf("value: [", marker);
-  if (marker < 0 || valueAt < 0) throw new Error("mountain random table is missing from main.bundle.js");
+  const valueAt = text.indexOf("value:[.120477647");
+  if (valueAt < 0) throw new Error("mountain random table is missing from main.bundle.js");
   const end = text.indexOf("]", valueAt);
-  return vm.runInThisContext(`(${text.slice(valueAt + "value: ".length, end + 1)})`);
+  return vm.runInThisContext(`(${text.slice(valueAt + "value:".length, end + 1)})`);
 }
 
 function mountains(bounds, table) {
@@ -172,6 +135,9 @@ function collisionPoints(file) {
   const mesh = document.meshes.find((item) => item.name === "Collision");
   if (!mesh) throw new Error("car.glb has no Collision mesh");
   const accessor = document.accessors[mesh.primitives[0].attributes.POSITION];
+  if (accessor.bufferView == null) {
+    throw new Error("car collision mesh is compressed. Re-run node scripts/dump_parts.mjs against the 0.6.3 page.");
+  }
   const view = document.bufferViews[accessor.bufferView];
   const binStart = 20 + jsonLength;
   const binHeader = 8;
@@ -187,15 +153,52 @@ function collisionPoints(file) {
   return points;
 }
 
-function slim(state) {
+function typedParts(parts) {
+  return parts.map((part) => ({
+    id: part.id,
+    vertices: Float32Array.from(part.vertices),
+    detector: part.detector,
+    startOffset: part.startOffset,
+  }));
+}
+
+function decodeCarState(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let cursor = 4;
+  const read24 = () => {
+    const value = bytes[cursor] | (bytes[cursor + 1] << 8) | (bytes[cursor + 2] << 16);
+    cursor += 3;
+    return value;
+  };
+  const frames = read24();
+  const speedKmh = view.getFloat32(cursor, true);
+  cursor += 4;
+  const flags = bytes[cursor];
+  cursor += 1;
+  const finishFrames = flags & 2 ? read24() : null;
+  const nextCheckpointIndex = view.getUint16(cursor, true);
+  cursor += 2;
+  const position = {
+    x: view.getFloat32(cursor, true),
+    y: view.getFloat32(cursor + 4, true),
+    z: view.getFloat32(cursor + 8, true),
+  };
+  cursor += 12;
+  const quaternion = {
+    x: view.getFloat32(cursor, true),
+    y: view.getFloat32(cursor + 4, true),
+    z: view.getFloat32(cursor + 8, true),
+    w: view.getFloat32(cursor + 12, true),
+  };
   return {
-    frames: state.frames,
-    speedKmh: state.speedKmh,
-    finishFrames: state.finishFrames,
-    nextCheckpointIndex: state.nextCheckpointIndex,
-    position: state.position,
-    quaternion: state.quaternion,
-    wheels: state.wheelContact.map((item) => item != null),
+    frames,
+    speedKmh,
+    finishFrames,
+    nextCheckpointIndex,
+    position,
+    quaternion,
+    wheels: [!!(flags & 8), !!(flags & 16), !!(flags & 32), !!(flags & 64)],
   };
 }
 
@@ -230,8 +233,8 @@ function postMessage(message) {
     boundsMessage = message;
     return;
   }
-  if (message.messageType === 10 && message.carStates && message.carStates.length > 0) {
-    const state = slim(message.carStates[message.carStates.length - 1]);
+  if (message.messageType === 10 && message.carStateBuffers && message.carStateBuffers.length > 0) {
+    const state = decodeCarState(message.carStateBuffers[message.carStateBuffers.length - 1]);
     if (waiting && state.frames >= waiting) {
       waiting = null;
       write({ type: "state", state, checkpointCount });
@@ -244,9 +247,14 @@ function boot(command) {
   const partsFile = path.resolve(command.parts);
   const trackFile = path.resolve(command.track);
   process.chdir(root);
-  const parts = JSON.parse(fs.readFileSync(partsFile, "utf8"));
+  const cached = JSON.parse(fs.readFileSync(partsFile, "utf8"));
+  const parts = Array.isArray(cached) ? cached : cached.parts;
+  if (!Array.isArray(parts)) fail("physics mesh cache has no parts");
   trackText = fs.readFileSync(trackFile, "utf8").trim();
-  collision = collisionPoints(path.join(root, "models/car.glb"));
+  collision = Array.isArray(cached.collision) && cached.collision.length
+    ? cached.collision
+    : collisionPoints(path.join(root, "models/car.glb"));
+  const massOffset = typeof cached.massOffset === "number" ? cached.massOffset : MASS_OFFSET;
   const table = rngTable(path.join(root, "main.bundle.js"));
   const context = {
     console,
@@ -268,6 +276,19 @@ function boot(command) {
     queueMicrotask,
     JS_SHA256_NO_NODE_JS: true,
     postMessage,
+    location: { href: pathToFileURL(path.join(root, "simulation_worker.bundle.js")).href },
+    fetch: async (url) => {
+      const target = fileURLToPath(url);
+      const body = fs.readFileSync(target);
+      const copy = new Uint8Array(body.byteLength);
+      copy.set(body);
+      return {
+        ok: true,
+        status: 200,
+        url: String(url),
+        arrayBuffer: async () => copy.buffer,
+      };
+    },
   };
   simContext = context;
   vm.createContext(context);
@@ -275,6 +296,23 @@ function boot(command) {
   context.self = context;
   context.window = context;
   context.globalThis = context;
+  const listeners = new Map();
+  context.addEventListener = (type, fn) => {
+    const list = listeners.get(type) || [];
+    list.push(fn);
+    listeners.set(type, list);
+  };
+  context.removeEventListener = (type, fn) => {
+    const list = listeners.get(type) || [];
+    const index = list.indexOf(fn);
+    if (index >= 0) list.splice(index, 1);
+  };
+  context.dispatchEvent = (event) => {
+    for (const fn of listeners.get(event.type) || []) fn(event);
+  };
+  context.document = {
+    createElementNS: () => ({ style: {}, setAttribute() {}, appendChild() {} }),
+  };
   context.importScripts = (...urls) => {
     const saved = context.importScripts;
     delete context.importScripts;
@@ -297,7 +335,16 @@ function boot(command) {
     }
     clearInterval(timer);
     workerMessage = context.onmessage;
-    workerMessage({ data: { messageType: 0, isRealtime: false, trackParts: parts } });
+    workerMessage({
+      data: {
+        messageType: 0,
+        version: "0.6.3",
+        isRealtime: false,
+        trackParts: typedParts(parts),
+        carCollisionShapeVertices: collision,
+        carMassOffset: massOffset,
+      },
+    });
     workerMessage({ data: { messageType: 11, trackData: trackText } });
     if (!boundsMessage) fail("track did not report its bounds");
     mountain = mountains(boundsMessage.bounds, table);

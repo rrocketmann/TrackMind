@@ -1,4 +1,4 @@
-"""Train and evaluate the PPO policy in the schoolagy PolyTrack 0.5.2 simulation."""
+"""Train and evaluate the PPO policy in the schoolagy PolyTrack 0.6.3 simulation."""
 
 from __future__ import annotations
 
@@ -30,11 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     common = _common()
     parser = argparse.ArgumentParser(
         prog="polytrack-agent",
-        description="PPO driver for the PolyTrack 0.5.2 simulation in schoolagy.",
+        description="PPO driver for the PolyTrack 0.6.3 simulation in schoolagy.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    train = sub.add_parser("train", parents=[common], help="Train PPO on the 0.5.2 car")
+    train = sub.add_parser("train", parents=[common], help="Train PPO on the 0.6.3 car")
     train.add_argument("--out", type=Path, default=None)
     train.add_argument("--device", default=None)
     train.set_defaults(func=cmd_train)

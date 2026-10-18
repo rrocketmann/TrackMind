@@ -105,6 +105,7 @@ def _sim_ready() -> bool:
     return (
         shutil.which("node") is not None
         and (root / "simulation_worker.bundle.js").is_file()
+        and (root / "polytrack_physics.wasm").is_file()
         and parts.is_file()
     )
 
@@ -145,7 +146,7 @@ def test_one_ppo_update_on_the_sim(tmp_path):
     report = train_ppo(cfg, max_updates=1)
     assert report["updates"] == 1
     payload = read_checkpoint(tmp_path / "run" / "last.pt", torch.device("cpu"))
-    assert payload["arch"] == ARCH == "schoolagy-ppo-v1"
+    assert payload["arch"] == ARCH == "schoolagy-ppo-0.6.3"
     assert payload["track"] == "summer1"
     assert payload["n_actions"] == 9
     assert payload["obs_dim"] == obs_dim(9)
