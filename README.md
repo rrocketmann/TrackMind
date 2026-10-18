@@ -2,7 +2,7 @@
 
 PPO on the car that ships in the local schoolagy checkout at `/home/martinmalyshau/dev/schoolagy/polytrack`. The game's own Ammo worker is the environment. The policy reads the car state and picks one key hold. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
 
-This checkout is PolyTrack 0.5.2. Official [polytrack.dev](https://polytrack.dev) is 0.6.3 and runs a different C++ simulation inside the page. A policy or a press sequence from this trainer does not transfer to that client. This program does not open the official page, read its memory, or submit a leaderboard time. The schoolagy build itself says unofficial versions cannot use the leaderboard.
+This checkout is PolyTrack 0.5.2. The official game is [kodub.com/apps/polytrack](https://www.kodub.com/apps/polytrack), version 0.6.3, with a different C++ simulation inside the page. A policy or a press sequence from this trainer does not transfer to that client. This program does not open the official page, read its memory, or submit a leaderboard time. The schoolagy build itself says unofficial versions cannot use the leaderboard.
 
 ## What a step is
 
