@@ -8,10 +8,6 @@ import torch
 
 log = logging.getLogger(__name__)
 
-# 8GB desktop 3050, with a little room above the reported total.
-_SHARED_VRAM_BYTES = 10 * 1024**3
-_PYTORCH_FRACTION = 0.75
-
 
 def resolve_device(name: str) -> torch.device:
     if name == "auto":
@@ -34,17 +30,5 @@ def configure_torch(device: torch.device) -> str:
     index = device.index if device.index is not None else torch.cuda.current_device()
     props = torch.cuda.get_device_properties(index)
     name = torch.cuda.get_device_name(index)
-    if props.total_memory <= _SHARED_VRAM_BYTES:
-        try:
-            torch.cuda.set_per_process_memory_fraction(_PYTORCH_FRACTION, index)
-            log.info(
-                "%s has %d MiB. PyTorch will use about %d%%.",
-                name,
-                props.total_memory // (1024**2),
-                int(_PYTORCH_FRACTION * 100),
-            )
-        except RuntimeError as exc:
-            log.info("Could not cap CUDA memory (%s).", exc)
-    else:
-        log.info("%s has %d MiB.", name, props.total_memory // (1024**2))
+    log.info("%s has %d MiB.", name, props.total_memory // (1024**2))
     return name

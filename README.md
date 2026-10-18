@@ -1,6 +1,6 @@
 # PolyTrack agent
 
-PPO on the car that ships in the local schoolagy checkout at `/home/martinmalyshau/dev/schoolagy/polytrack`. The game's own Ammo worker is the environment. The policy reads the car state and picks one key hold. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
+PPO on the car that ships in a schoolagy PolyTrack 0.5.2 checkout. The game's own Ammo worker is the environment. The policy reads the car state and picks one key hold. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
 
 This checkout is PolyTrack 0.5.2. The official game is [kodub.com/apps/polytrack](https://www.kodub.com/apps/polytrack), version 0.6.3, with a different C++ simulation inside the page. A policy or a press sequence from this trainer does not transfer to that client. This program does not open the official page, read its memory, or submit a leaderboard time. The schoolagy build itself says unofficial versions cannot use the leaderboard.
 
@@ -23,9 +23,10 @@ Checkpoints use arch `schoolagy-ppo-v1`. Older `state-ppo-v1` files do not load.
 
 ## Setup
 
-You need Python 3.10+, PyTorch, and Node. `game.root` in the config points at the schoolagy tree. The default on this machine is `/home/martinmalyshau/dev/schoolagy/polytrack`.
+You need Python 3.10+, PyTorch, Node, and a Chromium or Chrome binary. `POLYTRACK_ROOT` is the schoolagy directory that contains `simulation_worker.bundle.js` and `tracks/`. Copy that checkout onto the training machine. The mesh cache is built there and is not in git.
 
 ```bash
+export POLYTRACK_ROOT=/path/to/schoolagy/polytrack
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -33,13 +34,11 @@ node scripts/dump_parts.mjs
 python -m pytest
 ```
 
-`scripts/dump_parts.mjs` serves the schoolagy page once in headless Chromium and saves the physics meshes from the worker's Init message. The file is `polytrack_agent/sim/cache/track_parts.json`, about 8 MB, and it is gitignored. Training after that dump does not open a window. Pass another game root or output path as arguments:
+`scripts/dump_parts.mjs` serves that checkout once in headless Chromium and saves the physics meshes from the worker's Init message. The file is `polytrack_agent/sim/cache/track_parts.json`, about 8 MB, and it is gitignored. Training after that dump does not open a window. The script looks for `google-chrome`, `chromium`, or a Playwright Chromium under the home directory. Set `CHROME` when the binary is somewhere else.
 
 ```bash
-node scripts/dump_parts.mjs /path/to/schoolagy/polytrack /path/to/track_parts.json
+node scripts/dump_parts.mjs "$POLYTRACK_ROOT" /path/to/track_parts.json
 ```
-
-Set `CHROME` if Playwright's Chromium is somewhere else. The default looks at `~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome`.
 
 ## Train and play
 
@@ -50,11 +49,11 @@ python scripts/play.py --episodes 5
 
 `scripts/train.py` runs until you stop it. It writes `runs/summer1/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/summer1/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode.
 
-Both commands take `--config some.yaml`. The overlay is merged onto `polytrack_agent/default_config.yaml`. `configs/default.yaml` is the same file for reading. Useful fields:
+`POLYTRACK_ROOT` overrides `game.root`. Both commands also take `--config some.yaml`, merged onto `polytrack_agent/default_config.yaml`. Useful fields:
 
 | Field | Meaning |
 | --- | --- |
-| `game.root` | schoolagy `polytrack` directory |
+| `game.root` | schoolagy `polytrack` directory, when `POLYTRACK_ROOT` is unset |
 | `game.track` | `.track` export, relative to `game.root` unless absolute |
 | `game.parts` | mesh cache. Empty uses `polytrack_agent/sim/cache/track_parts.json` |
 | `keys` | subset of `w a s d` |

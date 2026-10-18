@@ -63,9 +63,6 @@ def validate_output_keys(keys: list[str]) -> list[str]:
 def default_config_path() -> Path:
     if _PACKAGE_CONFIG.is_file():
         return _PACKAGE_CONFIG
-    fallback = _PACKAGE_CONFIG.parents[1] / "configs" / "default.yaml"
-    if fallback.is_file():
-        return fallback
     raise FileNotFoundError("default_config.yaml is missing from the package")
 
 

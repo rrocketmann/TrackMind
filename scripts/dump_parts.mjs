@@ -4,14 +4,75 @@
 
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import net from "node:net";
+import { execFileSync, spawn } from "node:child_process";
 
-const root = process.argv[2] || "/home/martinmalyshau/dev/schoolagy/polytrack";
+const root = path.resolve(process.argv[2] || process.env.POLYTRACK_ROOT || "");
 const out = process.argv[3] || path.resolve("polytrack_agent/sim/cache/track_parts.json");
-const chrome =
-  process.env.CHROME ||
-  "/home/martinmalyshau/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
+
+if (!process.argv[2] && !process.env.POLYTRACK_ROOT) {
+  console.error("Set POLYTRACK_ROOT, or pass the schoolagy polytrack directory as the first argument.");
+  process.exit(1);
+}
+if (!fs.existsSync(path.join(root, "index.html"))) {
+  console.error(`${root} has no index.html.`);
+  process.exit(1);
+}
+
+function findChrome() {
+  if (process.env.CHROME) return process.env.CHROME;
+  const names = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"];
+  for (const name of names) {
+    try {
+      const found = execFileSync("which", [name], { encoding: "utf8" }).trim();
+      if (found) return found;
+    } catch {
+      // try the next name
+    }
+  }
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, ".cache/ms-playwright"),
+  ];
+  if (process.platform === "darwin") {
+    candidates.push("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    candidates.push("/Applications/Chromium.app/Contents/MacOS/Chromium");
+  }
+  if (process.platform === "win32") {
+    const local = process.env.LOCALAPPDATA || "";
+    const programFiles = process.env.PROGRAMFILES || "C:\\Program Files";
+    candidates.push(path.join(programFiles, "Google/Chrome/Application/chrome.exe"));
+    candidates.push(path.join(local, "Google/Chrome/Application/chrome.exe"));
+  }
+  for (const candidate of candidates) {
+    if (candidate.endsWith("chrome") || candidate.endsWith("Chromium") || candidate.endsWith("chrome.exe")) {
+      if (fs.existsSync(candidate)) return candidate;
+      continue;
+    }
+    if (!fs.existsSync(candidate)) continue;
+    const hits = fs.readdirSync(candidate)
+      .filter((name) => name.startsWith("chromium-"))
+      .map((name) => path.join(candidate, name, "chrome-linux64/chrome"))
+      .filter((file) => fs.existsSync(file))
+      .sort();
+    if (hits.length) return hits[hits.length - 1];
+  }
+  throw new Error("Set CHROME to a Chromium or Chrome binary. The mesh dump needs it once.");
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
+}
+
+const chrome = findChrome();
 
 function contentType(file) {
   if (file.endsWith(".js")) return "text/javascript";
@@ -67,7 +128,7 @@ await new Promise((resolve) => {
 });
 
 const pagePort = dumped.port;
-const debugPort = 9333;
+const debugPort = await freePort();
 const child = spawn(
   chrome,
   [
@@ -100,7 +161,9 @@ async function browserSocket() {
   throw new Error("Chrome did not open a debugging port");
 }
 
-const ws = new WebSocket(await browserSocket());
+let ws;
+try {
+ws = new WebSocket(await browserSocket());
 await new Promise((resolve, reject) => {
   ws.addEventListener("open", resolve);
   ws.addEventListener("error", () => reject(new Error("debugging socket failed")));
@@ -158,8 +221,10 @@ await send("Page.enable", {}, sessionId);
 await send("Page.addScriptToEvaluateOnNewDocument", { source: hook }, sessionId);
 await send("Page.navigate", { url: `http://127.0.0.1:${pagePort}/index.html` }, sessionId);
 
-const bytes = await dumped;
-child.kill();
-ws.close();
-dumped.server.close();
-console.log(`Wrote ${out} (${bytes} bytes)`);
+  const bytes = await dumped;
+  console.log(`Wrote ${out} (${bytes} bytes)`);
+} finally {
+  child.kill();
+  if (ws) ws.close();
+  dumped.server.close();
+}

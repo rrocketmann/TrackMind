@@ -165,7 +165,6 @@ def train_ppo(
             current_length = 0
         if sum(lengths) < 2:
             return
-        env.runtime.release_keys()
         advantages, targets = _episode_gae(stored_rewards, stored_dones, stored_values, lengths, gamma, lam)
         observations = torch.from_numpy(np.stack(stored_obs).astype(np.float32)).to(device)
         stats = ppo_update(
@@ -249,9 +248,8 @@ def train_ppo(
                 if len(episode_returns) >= group_size:
                     flush()
     except KeyboardInterrupt:
-        log.info("Stopped. Keys released.")
+        log.info("Stopped.")
     finally:
-        env.runtime.release_keys()
         if own_env:
             env.close()
     return {"updates": updates, "best_progress": best_progress, "rows": rows, "out_dir": str(out_dir)}

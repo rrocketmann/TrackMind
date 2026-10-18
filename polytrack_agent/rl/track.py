@@ -7,17 +7,28 @@ up/down/left/right and scores progress from the car state the worker returns.
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 from polytrack_agent.rl.actions import mask_for
 from polytrack_agent.sim.client import SimClient
 
 
-class _NoKeys:
-    dry_run = True
-
-    def release_keys(self) -> None:
-        return None
+def game_root(cfg: dict) -> Path:
+    """Directory that contains the schoolagy simulation worker."""
+    raw = os.environ.get("POLYTRACK_ROOT") or (cfg.get("game") or {}).get("root")
+    if not raw:
+        raise ValueError(
+            "Set POLYTRACK_ROOT to the schoolagy polytrack directory, or set game.root in --config."
+        )
+    root = Path(raw).expanduser().resolve()
+    worker = root / "simulation_worker.bundle.js"
+    if not worker.is_file():
+        raise FileNotFoundError(
+            f"{root} has no simulation_worker.bundle.js. "
+            "POLYTRACK_ROOT must be the schoolagy polytrack directory."
+        )
+    return root
 
 
 def _controls(action_id: int, keys: list[str]) -> dict[str, bool]:
@@ -36,14 +47,19 @@ class SchoolagyTrack:
 
     def __init__(self, cfg: dict, client: SimClient | None = None):
         game = cfg["game"]
-        root = Path(game["root"])
+        root = game_root(cfg)
         track = Path(game["track"])
         if not track.is_absolute():
             track = root / track
+        if not track.is_file():
+            raise FileNotFoundError(f"Track file not found: {track}")
         parts = Path(game.get("parts") or Path(__file__).resolve().parents[1] / "sim" / "cache" / "track_parts.json")
+        if not parts.is_file():
+            raise FileNotFoundError(
+                f"Missing physics meshes at {parts}. Run `node scripts/dump_parts.mjs` once on this machine."
+            )
         self.cfg = cfg
         self.keys = list(cfg["keys"])
-        self.runtime = _NoKeys()
         self.client = client if client is not None else SimClient(root, parts, track)
         self.repeat = max(1, int(cfg["rl"].get("action_repeat") or 50))
         self.timeout_s = float(cfg["rl"].get("timeout_s") or 90)

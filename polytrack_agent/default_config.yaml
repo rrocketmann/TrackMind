@@ -2,7 +2,7 @@
 # The car is the game's own Ammo worker. It is not the official 0.6 client.
 
 game:
-  root: /home/martinmalyshau/dev/schoolagy/polytrack
+  root: null             # overridden by POLYTRACK_ROOT or a --config overlay
   track: tracks/official/summer1.track
   parts: null            # default is polytrack_agent/sim/cache/track_parts.json
 

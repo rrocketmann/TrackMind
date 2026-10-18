@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.ppo import ppo_loss
 from polytrack_agent.rl.state import FEATURES, LapNumbers, obs_dim
-from polytrack_agent.rl.track import make_track
+from polytrack_agent.rl.track import game_root, make_track
 from polytrack_agent.rl.trainer import train_ppo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,9 +88,19 @@ def test_ppo_loss_is_finite():
     assert set(stats) == {"loss", "policy", "value", "entropy"}
 
 
-def _sim_ready() -> bool:
+def test_missing_game_root_is_an_error(monkeypatch):
+    monkeypatch.delenv("POLYTRACK_ROOT", raising=False)
     cfg = load_config(None)
-    root = Path(cfg["game"]["root"])
+    cfg["game"]["root"] = None
+    with pytest.raises(ValueError):
+        game_root(cfg)
+
+
+def _sim_ready() -> bool:
+    raw = os.environ.get("POLYTRACK_ROOT")
+    if not raw:
+        return False
+    root = Path(raw)
     parts = ROOT / "polytrack_agent" / "sim" / "cache" / "track_parts.json"
     return (
         shutil.which("node") is not None
