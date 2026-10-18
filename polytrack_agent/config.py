@@ -1,4 +1,4 @@
-"""Load and merge the vision-agent config."""
+"""Load and merge the training config."""
 
 from __future__ import annotations
 
@@ -41,19 +41,22 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 
 def validate_output_keys(keys: list[str]) -> list[str]:
-    """Normalize driving keys and reject restart, pause, and modifier keys."""
+    """Normalize driving keys and reject anything the 0.5.2 car does not steer with."""
     normalized = [str(key).lower().strip() for key in keys]
     if not normalized or any(not key for key in normalized):
-        raise ValueError("record.keys must list at least one driving key")
+        raise ValueError("keys must list at least one driving key")
     if len(set(normalized)) != len(normalized):
-        raise ValueError(f"duplicate keys in record.keys: {normalized}")
+        raise ValueError(f"duplicate keys: {normalized}")
     denied = [key for key in normalized if key in OUTPUT_DENYLIST]
     if denied:
         raise ValueError(
-            f"Refusing output keys {denied}. The agent must not press restart, "
-            "pause, or modifier keys. Restart the track yourself, or let a later "
-            "RL wrapper call an explicit restart hook."
+            f"Refusing keys {denied}. Restart, pause, and modifiers are not actions. "
+            "An episode restart deletes the car and creates it at the start."
         )
+    allowed = {"w", "a", "s", "d", "up", "down", "left", "right"}
+    extra = [key for key in normalized if key not in allowed]
+    if extra:
+        raise ValueError(f"PolyTrack 0.5.2 only has up, down, left, and right. Refusing {extra}.")
     return normalized
 
 
@@ -78,5 +81,5 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         if not isinstance(overlay, dict):
             raise ValueError(f"Config {overlay_path} must be a mapping")
         config = deep_merge(config, overlay)
-    config["record"]["keys"] = validate_output_keys(list(config["record"]["keys"]))
+    config["keys"] = validate_output_keys(list(config["keys"]))
     return config

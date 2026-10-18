@@ -12,7 +12,7 @@ from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.state import obs_dim
 
-ARCH = "state-ppo-v1"
+ARCH = "schoolagy-ppo-v1"
 
 
 def read_checkpoint(path: Path, device: torch.device) -> dict[str, Any]:
@@ -40,7 +40,7 @@ def bind_runtime(cfg: dict, payload: dict[str, Any]) -> dict:
     if int(payload["obs_dim"]) != obs_dim(chords):
         raise ValueError(f"checkpoint obs_dim {payload['obs_dim']} does not match {obs_dim(chords)}")
     bound = copy.deepcopy(cfg)
-    bound["record"]["keys"] = keys
+    bound["keys"] = keys
     return bound
 
 

@@ -1,18 +1,16 @@
-"""Online PPO. A group of real laps is collected, then the keys are released for the update."""
+"""Online PPO on the schoolagy PolyTrack 0.5.2 simulation."""
 
 from __future__ import annotations
 
 import csv
 import logging
-import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from polytrack_agent.env import PolyTrackVisionEnv
-from polytrack_agent.rl.headless import HeadlessTrack
-from polytrack_agent.policy.cnn import resolve_device
+from polytrack_agent.rl.device import resolve_device
+from polytrack_agent.rl.track import SchoolagyTrack, make_track
 from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint, save_checkpoint
 from polytrack_agent.rl.device import configure_torch
@@ -91,35 +89,30 @@ def _resume(path: Path, model: StateActorCritic, device: torch.device, track: st
     return True
 
 
+def _begin(env: SchoolagyTrack, numbers: LapNumbers) -> None:
+    numbers.reset()
+    numbers.advance(env.reset(restart=True), -1)
+
+
 def train_ppo(
     cfg: dict,
-    reference: Path | None = None,
-    env: PolyTrackVisionEnv | None = None,
+    env: SchoolagyTrack | None = None,
     max_updates: int | None = None,
 ) -> dict:
-    """Update the policy and the value head on one track.
+    """Update the policy and the value head on the 0.5.2 car.
 
-    The actor sees lap numbers only. Each press is scored with its own
-    advantage from the value head, and the PPO step trains both heads.
-    `rl.track: summer1` uses the official Summer 1 road. Pass `env` only
-    from tests. A checkpoint resumes only when its track matches.
+    The actor sees the simulation's car state. Each press is scored with its
+    own advantage, and the PPO step trains both heads. A checkpoint resumes
+    only when its track matches.
     """
     rl_cfg = cfg["rl"]
     device = resolve_device(str(rl_cfg.get("device") or "auto"))
     hardware = configure_torch(device)
-    track = str(rl_cfg.get("track") or "summer1")
+    track = Path(cfg["game"]["track"]).stem
     log.info("PPO device %s (%s) track %s", device, hardware, track)
     own_env = env is None
     if env is None:
-        del reference
-        if track == "summer1":
-            from polytrack_agent.rl.summer1 import make_track
-
-            env = make_track(cfg)
-        elif track == "loop":
-            env = HeadlessTrack(cfg)
-        else:
-            raise ValueError(f"unknown rl.track {track!r}")
+        env = make_track(cfg)
     chords = n_actions(env.keys)
     hidden = int(rl_cfg.get("hidden") or 128)
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
@@ -135,7 +128,6 @@ def train_ppo(
     gamma = float(rl_cfg.get("gamma") or 0.99)
     lam = float(rl_cfg.get("lam") or 0.95)
     value_coef = float(rl_cfg.get("value_coef") or 0.5)
-    settle = float(rl_cfg.get("finish_settle_s") or 0.0)
     meta = _meta(model, env.keys, track)
     log_path = out_dir / "log.csv"
     best_progress = -1.0
@@ -148,7 +140,7 @@ def train_ppo(
 
     numbers = LapNumbers(chords)
     rows: list[dict] = []
-    env.reset(restart=True)
+    _begin(env, numbers)
     updates = 0
     stored_obs: list[np.ndarray] = []
     stored_actions: list[int] = []
@@ -251,17 +243,9 @@ def train_ppo(
                 episode_lengths.append(current_length)
                 current_return = 0.0
                 current_length = 0
-                if info.get("finished") and not env.runtime.dry_run and settle > 0:
-                    env.runtime.release_keys()
-                    log.info(
-                        "Finish at progress %.2f. Waiting %.1fs so Chromium can submit the run.",
-                        info.get("progress") or 0.0,
-                        settle,
-                    )
-                    time.sleep(settle)
-                restart = not bool(info.get("restarted"))
-                numbers.reset()
-                env.reset(restart=restart)
+                if info.get("finished"):
+                    log.info("Finish at progress %.2f.", info.get("progress") or 0.0)
+                _begin(env, numbers)
                 if len(episode_returns) >= group_size:
                     flush()
     except KeyboardInterrupt:

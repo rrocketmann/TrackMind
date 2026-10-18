@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the PPO policy in the official Chromium window."""
+"""Train PPO on the schoolagy PolyTrack 0.5.2 simulation."""
 
 import sys
 from pathlib import Path

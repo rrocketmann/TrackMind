@@ -1,71 +1,21 @@
-# Vision-only agent for the official PolyTrack window.
-# The policy sees screen pixels. It does not read game memory, the page DOM, or sockets.
+# PPO on the PolyTrack 0.5.2 simulation that ships in schoolagy.
+# The car is the game's own Ammo worker. It is not the official 0.6 client.
 
-capture:
-  backend: auto          # auto | mss | dxcam (dxcam is Windows-only)
-  monitor: 1             # mss index; 1 is the first real display
-  browser: chromium      # capture this browser, not an editor or a local file
-  url: https://www.kodub.com/apps/polytrack
-  window_title: PolyTrack
-  follow_window: true    # ignored when region is set
-  geometry_refresh_s: 0.5
-  region: null           # or {left, top, width, height} in screen pixels
-  crop:
-    top: 0
-    left: 0
-    bottom: 0
-    right: 0
-  fps: 30
-  dxcam_device: 0
-  dxcam_output: 0
+game:
+  root: /home/martinmalyshau/dev/schoolagy/polytrack
+  track: tracks/official/summer1.track
+  parts: null            # default is polytrack_agent/sim/cache/track_parts.json
 
-record:
-  out_dir: data/recordings
-  size: [180, 320]       # H, W stored on disk
-  # Stock PolyTrack drives with WASD (air pitch/roll reuses those keys).
-  # q and e are optional outputs for a custom air bind. They stay released
-  # if your demos never press them. Add "space" only if your game uses it.
-  keys: [w, a, s, d, q, e]
-  chunk_size: 256
-  max_gap_s: 0.25
-  max_minutes: null
-
-train:
-  backbone: dinov3       # dinov3 | cnn
-  image_size: [192, 320] # H, W. DINOv3 needs multiples of the patch size (16)
-  dino_model: facebook/dinov3-vits16-pretrain-lvd1689m
-  pool: [4, 6]           # spatial tokens kept from the patch grid
-  transformer_layers: 2
-  transformer_heads: 6
-  stack: 4
-  use_prev_action: true  # the agent's own last keys, not game memory
-  batch_size: 16
-  epochs: 20
-  lr: 0.0003
-  weight_decay: 0.0001
-  ema_decay: 0.99        # 0 disables EMA and keeps the live weights
-  val_fraction: 0.15
-  augment: true
-  seed: 0
-  num_workers: 0
-  device: auto
-  out_dir: runs/bc
-  samples_per_epoch: null
-  sampler: weighted      # weighted | shuffle
-  dropout: 0.1
-  patience: 6
+keys: [w, a, s, d]
 
 rl:
-  action_repeat: 3
+  action_repeat: 50      # physics frames per decision. The worker steps at 1 ms.
   stuck_s: 8
   timeout_s: 90
-  reset_timeout_s: 5
-  finish_settle_s: 3
-  stack: 4
   epochs: 4
   minibatch_size: 256
   clip: 0.2
-  gamma: 0.99            # credit reaches about 10 seconds back at 10 decisions/s
+  gamma: 0.99
   lam: 0.95
   value_coef: 0.5
   entropy_coef: 0.01
@@ -73,40 +23,15 @@ rl:
   group_size: 4          # laps collected before one PPO update
   hidden: 128
   lr: 0.0003
-  track: summer1         # summer1 | loop. summer1 is the official road grid
-  resume: true           # continue from out_dir/last.pt when the track matches
+  resume: true
   device: auto
   out_dir: runs/summer1
 
 play:
-  checkpoint: runs/ppo/best.pt
-  mode: discrete         # discrete | continuous
-  threshold_on: 0.62
-  threshold_off: 0.38
-  deadzone: 0.18
-  exclusive_axes: true
-  require_focus: true
-  focus_check_hz: 20
+  checkpoint: runs/summer1/best.pt
   device: auto
-  min_key_freq: 0.002
-  reference: null        # reference.npz from scripts/make_reference.py
-  log: runs/play_log.csv
-
-progress:
-  downsample: [18, 32]   # H, W grayscale pictures used to align the lap
-  stride: 2
-  max_frames: 4000
-  search_window: 8
-  restart_backtrack: 0.12
-  restart_hold: 3
-  start_sim_margin: 0.05
-  match_min: 0.55
-  finish_progress: 0.97
-  finish_sim_min: 0.8
-  finish_hold: 8
 
 reward:
   progress_scale: 1.0
   time_penalty: 0.002
-  restart_penalty: 1.0
   finish_bonus: 1.0

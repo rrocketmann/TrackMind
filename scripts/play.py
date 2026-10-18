@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the vision policy live, or score a recording offline."""
+"""Run greedy episodes in the schoolagy PolyTrack 0.5.2 simulation."""
 
 import sys
 from pathlib import Path

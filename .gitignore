@@ -8,3 +8,4 @@ runs/
 shots/
 *.pt
 config.local.yaml
+polytrack_agent/sim/cache/

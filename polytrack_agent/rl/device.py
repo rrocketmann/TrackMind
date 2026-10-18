@@ -1,8 +1,4 @@
-"""CUDA setup for the desktop RTX 3050 in the custom PC.
-
-That card has 8GB. Chromium's WebGL view of the game shares it with PyTorch,
-so the frozen ViT stays in float16 and about 2GB is left for the browser.
-"""
+"""Pick a torch device and enable the fast CUDA kernels when one is present."""
 
 from __future__ import annotations
 
@@ -15,6 +11,12 @@ log = logging.getLogger(__name__)
 # 8GB desktop 3050, with a little room above the reported total.
 _SHARED_VRAM_BYTES = 10 * 1024**3
 _PYTORCH_FRACTION = 0.75
+
+
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(name)
 
 
 def configure_torch(device: torch.device) -> str:
@@ -36,13 +38,13 @@ def configure_torch(device: torch.device) -> str:
         try:
             torch.cuda.set_per_process_memory_fraction(_PYTORCH_FRACTION, index)
             log.info(
-                "%s has %d MiB. PyTorch will use about %d%% so Chromium can keep the game.",
+                "%s has %d MiB. PyTorch will use about %d%%.",
                 name,
                 props.total_memory // (1024**2),
                 int(_PYTORCH_FRACTION * 100),
             )
         except RuntimeError as exc:
-            log.info("Could not cap CUDA memory (%s). Close other GPU apps if Chromium stutters.", exc)
+            log.info("Could not cap CUDA memory (%s).", exc)
     else:
         log.info("%s has %d MiB.", name, props.total_memory // (1024**2))
     return name

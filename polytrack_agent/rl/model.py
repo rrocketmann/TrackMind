@@ -1,4 +1,4 @@
-"""Actor-critic over lap numbers. The picture is not an input."""
+"""Actor-critic over the 0.5.2 car state."""
 
 from __future__ import annotations
 

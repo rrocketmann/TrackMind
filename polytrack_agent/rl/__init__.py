@@ -1,1 +1,1 @@
-"""PPO on lap numbers. Real Chromium laps only, no world model."""
+"""PPO on the schoolagy PolyTrack 0.5.2 simulation."""

@@ -1,21 +1,16 @@
 [project]
 name = "polytrack-agent"
 version = "0.1.0"
-description = "Vision-based imitation-learning agent for the official PolyTrack game."
+description = "PPO on the PolyTrack 0.5.2 simulation in the local schoolagy checkout."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
   "torch>=2.1",
-  "transformers>=4.56",
-  "mss>=9.0.1",
-  "pynput>=1.7.6",
-  "Pillow>=10.0",
   "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
-windows = ["dxcam>=0.0.5"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
@@ -29,4 +24,4 @@ build-backend = "setuptools.build_meta"
 include = ["polytrack_agent*"]
 
 [tool.setuptools.package-data]
-polytrack_agent = ["default_config.yaml"]
+polytrack_agent = ["default_config.yaml", "sim/host.mjs"]

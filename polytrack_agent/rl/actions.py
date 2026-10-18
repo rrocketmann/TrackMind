@@ -1,49 +1,54 @@
-"""Discrete driving actions. Opposite keys never share a mask, and restart is absent."""
+"""Discrete holds of the 0.5.2 car. Opposite keys never share a mask."""
 
 from __future__ import annotations
 
+_THROTTLE = ("w", "up")
+_BRAKE = ("s", "down")
+_LEFT = ("a", "left")
+_RIGHT = ("d", "right")
+_ALLOWED = frozenset((*_THROTTLE, *_BRAKE, *_LEFT, *_RIGHT))
 
-def _pick(keys: set[str], options: tuple[str, ...]) -> list[str | None]:
-    found = [name for name in options if name in keys]
-    return [None, *found]
+
+def _named(keyset: set[str], options: tuple[str, ...]) -> str | None:
+    found = [name for name in options if name in keyset]
+    return found[0] if found else None
 
 
 def action_masks(keys: list[str]) -> list[dict[str, bool]]:
-    """Every legal hold, in a stable order."""
-    keyset = set(keys)
-    throttle = _pick(keyset, ("w", "up"))
-    steer = _pick(keyset, ("a", "left"))
-    # Brake and the other steer direction are separate axes.
-    brake = _pick(keyset, ("s", "down"))
-    right = _pick(keyset, ("d", "right"))
-    air_left = _pick(keyset, ("q",))
-    air_right = _pick(keyset, ("e",))
-    # Rebuild axes as {off, positive, negative} without duplicating off.
-    throttle_axis: list[str | None] = [None]
-    if len(throttle) > 1:
-        throttle_axis.append(throttle[1])
-    if len(brake) > 1:
-        throttle_axis.append(brake[1])
-    steer_axis: list[str | None] = [None]
-    if len(steer) > 1:
-        steer_axis.append(steer[1])
-    if len(right) > 1:
-        steer_axis.append(right[1])
-    air_axis: list[str | None] = [None]
-    if len(air_left) > 1:
-        air_axis.append(air_left[1])
-    if len(air_right) > 1:
-        air_axis.append(air_right[1])
+    """Every legal hold of up/down/left/right, in a stable order.
 
+    PolyTrack 0.5.2 has those four controls. Air pitch and roll reuse them
+    while the car is off the ground, so q and e are not actions.
+    """
+    keyset = set(keys)
+    unknown = sorted(keyset - _ALLOWED)
+    if unknown:
+        raise ValueError(
+            f"PolyTrack 0.5.2 only accepts {sorted(_ALLOWED)}. Refusing {unknown}."
+        )
+    throttle_axis: list[str | None] = [None]
+    steer_axis: list[str | None] = [None]
+    throttle = _named(keyset, _THROTTLE)
+    brake = _named(keyset, _BRAKE)
+    left = _named(keyset, _LEFT)
+    right = _named(keyset, _RIGHT)
+    if throttle is not None:
+        throttle_axis.append(throttle)
+    if brake is not None:
+        throttle_axis.append(brake)
+    if left is not None:
+        steer_axis.append(left)
+    if right is not None:
+        steer_axis.append(right)
     masks: list[dict[str, bool]] = []
     for throttle_key in throttle_axis:
         for steer_key in steer_axis:
-            for air_key in air_axis:
-                mask = {key: False for key in keys}
-                for name in (throttle_key, steer_key, air_key):
-                    if name is not None:
-                        mask[name] = True
-                masks.append(mask)
+            mask = {key: False for key in keys}
+            if throttle_key is not None:
+                mask[throttle_key] = True
+            if steer_key is not None:
+                mask[steer_key] = True
+            masks.append(mask)
     return masks
 
 

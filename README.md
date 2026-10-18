@@ -1,201 +1,77 @@
-# PolyTrack vision agent
+# PolyTrack agent
 
-A vision-only controller for the **official** PolyTrack window at [kodub.com/apps/polytrack](https://www.kodub.com/apps/polytrack). It captures the screen and presses keys. It does not fork the game, read its memory, scrape the page, or open its sockets.
+PPO on the car that ships in the local schoolagy checkout at `/home/martinmalyshau/dev/schoolagy/polytrack`. The game's own Ammo worker is the environment. The policy reads the car state and picks one key hold. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
 
-The policy is PPO on lap numbers: checkpoints passed, how close the next yellow gate looks, the last few changes in that score, time, stall, and the previous key chord. It picks one of 27 key holds. It does not see the picture. A value head gives each press its own advantage. The picture is only used to see the checkpoint gate.
+This checkout is PolyTrack 0.5.2. Official [polytrack.dev](https://polytrack.dev) is 0.6.3 and runs a different C++ simulation inside the page. A policy or a press sequence from this trainer does not transfer to that client. This program does not open the official page, read its memory, or submit a leaderboard time. The schoolagy build itself says unofficial versions cannot use the leaderboard.
 
-The game is the official page in Chromium, `https://www.kodub.com/apps/polytrack`. Play looks for a Chromium window titled PolyTrack and opens that URL when it is not already open.
+## What a step is
 
-Air pitch and roll in stock PolyTrack reuse WASD while the car is airborne. `q` and `e` are optional extra outputs for a custom bind.
+`polytrack_agent/sim/host.mjs` loads `simulation_worker.bundle.js` in a Node vm. Patches stay in memory. The schoolagy files on disk are not edited. The fast worker is pumped from Python, so a decision does not wait on a timer.
 
-A real finish in the official window is submitted by the game, as its own recording, when you are logged in with a nickname and the client’s determinism check passes. The agent waits a few seconds after a finish so that submit can complete. It does not POST a time itself. The unofficial local copy of the game cannot access the leaderboard. A time that is outside the loaded top 10 and is not a personal best is skipped by the client.
+Each decision holds W, A, S, and D for 50 physics frames (50 ms). The worker ticks at 1 ms. Those four keys are the whole 0.5.2 control set. Air pitch and roll reuse them while the car is off the ground. The nine actions are the exclusive combinations: throttle or brake or neither, and left or right or straight. Restart is not an action. An episode reset deletes the car and creates it at the start. The in-game respawn key would put the car back on the last checkpoint, so the trainer does not send it.
+
+The observation is twelve numbers plus a one-hot of the previous action:
+
+- speed, quaternion, upright, and the body's forward direction on the ground plane
+- fraction of wheels in contact, and whether the car is airborne
+- next checkpoint divided by the checkpoint count
+- height
+
+Reward is the change in progress, minus a small time penalty, plus a bonus on the finish. Progress is the checkpoint index plus how far the car has driven since that checkpoint, capped just short of the next index. A finish scores one past the last checkpoint. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, or the time limit.
+
+Checkpoints use arch `schoolagy-ppo-v1`. Older `state-ppo-v1` files do not load. `last.pt` resumes only when the track name matches. `best.pt` is the highest mean progress in an update.
+
+## Setup
+
+You need Python 3.10+, PyTorch, and Node. `game.root` in the config points at the schoolagy tree. The default on this machine is `/home/martinmalyshau/dev/schoolagy/polytrack`.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+node scripts/dump_parts.mjs
+python -m pytest
+```
+
+`scripts/dump_parts.mjs` serves the schoolagy page once in headless Chromium and saves the physics meshes from the worker's Init message. The file is `polytrack_agent/sim/cache/track_parts.json`, about 8 MB, and it is gitignored. Training after that dump does not open a window. Pass another game root or output path as arguments:
+
+```bash
+node scripts/dump_parts.mjs /path/to/schoolagy/polytrack /path/to/track_parts.json
+```
+
+Set `CHROME` if Playwright's Chromium is somewhere else. The default looks at `~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome`.
+
+## Train and play
+
+```bash
+python scripts/train.py
+python scripts/play.py --episodes 5
+```
+
+`scripts/train.py` runs until you stop it. It writes `runs/summer1/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/summer1/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode.
+
+Both commands take `--config some.yaml`. The overlay is merged onto `polytrack_agent/default_config.yaml`. `configs/default.yaml` is the same file for reading. Useful fields:
+
+| Field | Meaning |
+| --- | --- |
+| `game.root` | schoolagy `polytrack` directory |
+| `game.track` | `.track` export, relative to `game.root` unless absolute |
+| `game.parts` | mesh cache. Empty uses `polytrack_agent/sim/cache/track_parts.json` |
+| `keys` | subset of `w a s d` |
+| `rl.action_repeat` | physics frames per decision |
+| `rl.timeout_s` / `rl.stuck_s` | episode limits |
+| `rl.group_size` | laps collected before one PPO update |
+| `rl.out_dir` | checkpoint directory |
+| `reward.progress_scale` / `time_penalty` / `finish_bonus` | reward terms |
+
+The default track is `tracks/official/summer1.track`. Any other official or community `.track` in that checkout works after the same parts dump. The dump is the page's track-piece catalog, shared across tracks. Mountains and the car hull are built by the host from the game's own table and `models/car.glb`.
 
 ## Layout
 
 ```
-polytrack_agent/     vision capture, dataset, DINOv3 policy, control, play loop
-configs/default.yaml same defaults as polytrack_agent/default_config.yaml
-scripts/             record, train, play, calibrate, make_reference
+polytrack_agent/sim/     Node host, Python client, generated mesh cache
+polytrack_agent/rl/      observation, track env, PPO
+scripts/dump_parts.mjs   one-time mesh dump
+scripts/train.py
+scripts/play.py
 ```
-
-`PolyTrackVisionEnv` in `polytrack_agent/env.py` is the later RL hook: `reset` / `step` return stacked RGB frames and a reward built from visual lap progress. It still does not press the restart key for you.
-
-## Setup
-
-Linux needs an X11 session. `pynput` cannot read or send global keys on Wayland. Windows uses the same code; `dxcam` is the fast capture backend there.
-
-```bash
-cd polytrack-agent
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-# Windows, optional faster capture:
-pip install -r requirements-windows.txt
-python -m pytest
-```
-
-Chromium is opened for you if it is not already on the game:
-
-```bash
-chromium --app=https://www.kodub.com/apps/polytrack --class=polytrack-official
-```
-
-Use a borderless or fullscreen app window so the capture is the game, not the browser toolbar. Stay logged in with a nickname in that same profile.
-
-Use the same window size, zoom (100%), and graphics settings for recording and play. Hide the cursor over the game if it sits on the road.
-
-Official driving keys are WASD or the arrow keys. `R` or Enter restarts. This agent will not press `R`, Enter, or Escape. You restart the track.
-
-## Calibrate
-
-```bash
-python scripts/calibrate.py --preview shots/preview.png --write config.local.yaml
-```
-
-Open `shots/preview.png` and confirm it is the game view, not your desktop. If the browser toolbar is in the shot, set `capture.crop` or fullscreen the game and run calibrate again.
-
-`config.local.yaml` is a small overlay (fixed region, `follow_window: false`). A fixed region is the low-latency choice. Leaving `region: null` makes the agent follow a window whose title contains `PolyTrack`.
-
-Pass `--config config.local.yaml` to every later command.
-
-## Record
-
-Focus the game. Release WASD, start the recorder, then drive. Keys that were already held when the listener starts are invisible until you press them again.
-
-```bash
-python scripts/record.py --config config.local.yaml
-```
-
-| Key | Action |
-| --- | --- |
-| F6 | Pause or resume sampling |
-| F7 | New episode. Press this on every restart so laps stay separate |
-| F8 | Save and quit |
-
-The recorder only listens. It does not press keys. At the default 320×180 RGB and 30 fps, expect about 5 MB per minute. Sessions land in `data/recordings/session-*` as numpy chunks of frames plus a multi-hot key mask.
-
-Record one track per dataset. Include:
-
-- several clean laps at the pace you want copied
-- misses and the recovery back onto the racing line
-- jumps, so airborne WASD is in the pictures
-
-Ten to thirty minutes of that mix is a reasonable first set. More clean laps pull the policy toward your fast line. Recoveries are what let it finish after a mistake.
-
-Arrow keys, or `space` if your build actually uses it, go in `record.keys`. Do not add `r`.
-
-## Train
-
-```bash
-python scripts/train.py
-```
-
-Training is headless. There is no browser and no capture. The course is a centerline through the official Summer 1 road from PolyTrack 0.6.3 `summer1.track`: the start, the three checkpoint tiles, and the finish. The 48 points are samples along that road, not the three yellow gates. The car is a point on that grid. It has no grip, gravity, or slopes, so a simulated second is not a lap time. The reward goes up as the point gets closer to the next sample and by one more when it reaches that sample. Each PPO update trains the policy head and the value head. Checkpoints go to `runs/summer1/`. `last.pt` resumes only when its track matches, and `best.pt` is the highest mean progress. `runs/summer1/log.csv` is the update log. Ctrl+C stops the run.
-
-Later: do not extend this point car. Trackmania agents (`tmrl`, Linesight) leave physics to the real game. The next trainer should do the same with the official PolyTrack window: keys in, the game moves the car, reward from the three checkpoint gates. Soft Actor-Critic is the usual learner there. This headless run cannot supply that.
-
-## Offline agreement
-
-```bash
-python scripts/play.py --config config.local.yaml \
-  --checkpoint runs/bc/best.pt \
-  --offline data/recordings/session-YYYYMMDD-HHMMSS
-```
-
-This replays recorded pictures through the policy and prints per-key accuracy and F1. A DINOv3 checkpoint encodes every window again here, so it is slower than live play, which encodes only the newest frame. It does not open the game and does not press keys. Steer F1 around 0.7 or better on held-out laps is a sane bar before live play. If offline steering is wrong, live play will be wrong.
-
-## Visual progress
-
-Progress is a match between the live picture and a strip of tiny grayscale frames from one of your laps. A jump back toward the start of that strip is a restart. Reaching the end and staying there is a finish. There is no OCR and no timer read.
-
-Mark one clean lap with F7 so it is its own episode, then:
-
-```bash
-python scripts/make_reference.py --config config.local.yaml \
-  --session data/recordings/session-... \
-  --out data/reference.npz
-```
-
-Pass `--episode N` to pin a lap. Otherwise the longest episode is used. Point `play.reference` at the file, or pass `--reference data/reference.npz` when you play.
-
-The play log stores progress and the lap reward (forward progress, a time cost, a restart penalty, a finish bonus). PPO turns that per-step reward into an advantage with the value head. `PolyTrackVisionEnv.step` returns the per-decision reward.
-
-## Play
-
-```bash
-python scripts/play.py --config config.local.yaml --checkpoint runs/ppo/best.pt --episodes 5 --reference data/summer1-reference.npz
-```
-
-That is five episodes on whatever track is already loaded. Each row is finish, seconds, and max visual progress. A finish waits so the official client can submit, then the next episode taps `R`.
-
-F8 or Ctrl+C releases every key and exits. Keys are sent only while the foreground window title contains `PolyTrack` (`play.require_focus`). Alt-tab away and the agent lets go.
-
-Watch a dry run first. It prints the keys it would hold and presses nothing:
-
-```bash
-python scripts/play.py --config config.local.yaml --checkpoint runs/ppo/best.pt --dry-run
-```
-
-`play.mode` defaults to `discrete`: a key presses above `threshold_on` (0.62) and releases below `threshold_off` (0.38). Opposite steer, throttle, and air keys cannot be held together. `continuous` duty-cycles a key for part of the 30 Hz tick. PolyTrack reads digital keys, and very short taps are easy for the browser to miss, so leave `discrete` on unless you are experimenting.
-
-A PPO checkpoint reads the lap numbers and presses one chord. It does not run a vision network. A vision checkpoint still grabs a frame, infers, and turns per-key probabilities into holds. The small CNN is a few milliseconds on CPU. A fixed capture region avoids extra window lookups.
-
-## Config
-
-Edit `config.local.yaml` or `configs/default.yaml`. Important fields:
-
-| Field | Role |
-| --- | --- |
-| `capture.backend` | `auto` (dxcam on Windows, mss elsewhere), `mss`, or `dxcam` |
-| `capture.region` | Screen rectangle in pixels. Fixed is faster and steadier |
-| `capture.fps` | Record and play rate. 30 is the default |
-| `record.keys` | Output order. Default `w a s d q e` |
-| `record.size` | Stored frame size `[H, W]` |
-| `train.backbone` | `dinov3` (default) or `cnn` |
-| `train.dino_model` | Frozen Hugging Face id. Default is ViT-S/16 |
-| `train.image_size` | Network input `[H, W]`. DINOv3 needs multiples of 16. Saved in the checkpoint |
-| `train.pool` | Coarse token grid kept from the patch features, default `[4, 6]` |
-| `train.stack` | How many past frames the policy sees |
-| `rl.action_repeat` | Capture frames each discrete hold is kept. 3 is about 10 Hz |
-| `rl.finish_settle_s` | Pause after a finish so the official client can submit |
-| `capture.browser` | `chromium`. Capture ignores a PolyTrack window that is not Chromium |
-| `capture.url` | Official page opened when Chromium is not already on the game |
-| `rl.group_size` | Laps collected before one PPO update. Default 4 |
-| `play.threshold_on` / `threshold_off` | Hysteresis. Raise `threshold_on` if it steers too much |
-| `play.min_key_freq` | Keys rarer than this in the demos are forced off |
-
-The checkpoint's image size, stack, and key list win at play time. Record and play at the same resolution and crop.
-
-## Adding RL later
-
-`polytrack_agent/env.py` is the seam:
-
-```python
-env = PolyTrackVisionEnv(cfg, dry_run=False)
-obs = env.reset()          # uint8 (stack, H, W, 3)
-obs, reward, done, info = env.step(action)  # action[i] >= 0.5 presses key i
-```
-
-`info["progress"]` comes from the visual reference. `done` is a detected restart or finish. Wire that env to an RL algorithm in a new module. Keep the policy able to consume the same stacked frames so a behavior-cloning checkpoint can initialize it. Do not add a game-memory observation next to the pixels if you want the agent to stay vision-based.
-
-## Troubleshooting
-
-| Symptom | What to change |
-| --- | --- |
-| Keys go to the wrong window | `play.require_focus: true` and a title that matches the game. F8 releases keys |
-| A key sticks after a crash | Ctrl+C or F8. If the process was killed, click the game and tap that key once |
-| Preview shows the desktop or a toolbar | Fullscreen the game, set `capture.crop`, calibrate again |
-| Offline steer F1 is poor | More laps, same graphics settings, one track per model, train longer |
-| Live car only holds W | Steering F1 was the wrong number to ignore. Thresholds may also be too high to press A/D |
-| Car oscillates in a turn | Raise `threshold_on` a little, or lower `threshold_off` so a steer releases less eagerly. Discrete mode should already be on |
-| Recorder sees no keys | X11 session, not Wayland. Press the keys after the recorder starts |
-| `dxcam` import error on Linux | Leave `capture.backend` on `auto` or `mss` |
-| Progress never moves | Build `reference.npz` from a lap of this same track and window size |
-
-## Tests
-
-```bash
-python -m pytest
-```
-
-`tests/test_core.py` covers resize, key hysteresis, visual restart detection, the dataset, the temporal transformer, and a headless env step. `tests/test_train_smoke.py` trains the small CNN on a synthetic video and checks that it imitates left and right from pixels. Neither test downloads DINOv3 or needs the game.

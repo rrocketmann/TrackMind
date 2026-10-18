@@ -1,7 +1,7 @@
-"""Vision-based controller for the official PolyTrack game.
+"""PPO on the PolyTrack 0.5.2 car in the local schoolagy checkout.
 
-The agent looks at screen pixels and presses keys. It does not link against
-the game, read its memory, or ship a modified client.
+The policy reads the simulation's car state and picks a key hold. It does not
+capture the screen, submit a leaderboard time, or drive the official 0.6 client.
 """
 
 __version__ = "0.1.0"
