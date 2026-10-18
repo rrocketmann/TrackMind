@@ -73,9 +73,10 @@ rl:
   group_size: 4          # laps collected before one PPO update
   hidden: 128
   lr: 0.0003
-  resume: true           # continue from runs/ppo/last.pt when the layout matches
+  track: summer1         # summer1 | loop. summer1 is the official road grid
+  resume: true           # continue from out_dir/last.pt when the track matches
   device: auto
-  out_dir: runs/ppo
+  out_dir: runs/summer1
 
 play:
   checkpoint: runs/ppo/best.pt

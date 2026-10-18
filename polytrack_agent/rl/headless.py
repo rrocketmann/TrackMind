@@ -24,10 +24,23 @@ class _NoKeys:
 class HeadlessTrack:
     """Gymnasium-style env. `step` takes one chord id and advances simulated time."""
 
-    def __init__(self, cfg: dict):
+    def __init__(
+        self,
+        cfg: dict,
+        gates: tuple[tuple[float, float], ...] | None = None,
+        start: tuple[float, float] = (0.0, 0.0),
+        heading: float = 0.0,
+        gate_radius: float = 2.5,
+        reach: float = 20.0,
+    ):
         self.cfg = cfg
         self.keys = list(cfg["record"]["keys"])
         self.runtime = _NoKeys()
+        self.gates = tuple(gates) if gates is not None else GATES
+        if len(self.gates) < 1:
+            raise ValueError("a track needs at least one gate")
+        self.start = (float(start[0]), float(start[1]))
+        self.heading0 = float(heading)
         rl_cfg = cfg.get("rl") or {}
         capture = cfg.get("capture") or {}
         fps = float(capture.get("fps") or 30.0)
@@ -39,16 +52,16 @@ class HeadlessTrack:
         self.progress_scale = float(reward_cfg.get("progress_scale") or 1.0)
         self.time_penalty = float(reward_cfg.get("time_penalty") or 0.0)
         self.finish_bonus = float(reward_cfg.get("finish_bonus") or 0.0)
-        self.reach = 20.0
-        self.gate_radius = 2.5
+        self.reach = float(reach)
+        self.gate_radius = float(gate_radius)
         self.max_speed = 16.0
         self.reset(restart=False)
 
     def reset(self, restart: bool = False) -> None:
         del restart
-        self.x = 0.0
-        self.y = 0.0
-        self.heading = 0.0
+        self.x = self.start[0]
+        self.y = self.start[1]
+        self.heading = self.heading0
         self.speed = 0.0
         self.gate = 0
         self.time = 0.0
@@ -58,9 +71,9 @@ class HeadlessTrack:
         return None
 
     def _closest_progress(self) -> tuple[float, float, bool]:
-        if self.gate >= len(GATES):
-            return float(len(GATES)), 1.0, True
-        gx, gy = GATES[self.gate]
+        if self.gate >= len(self.gates):
+            return float(len(self.gates)), 1.0, True
+        gx, gy = self.gates[self.gate]
         dist = math.hypot(gx - self.x, gy - self.y)
         closeness = max(0.0, 1.0 - dist / self.reach)
         passed = dist <= self.gate_radius
@@ -89,10 +102,10 @@ class HeadlessTrack:
         self.time += self.dt
 
         progress, _closeness, passed = self._closest_progress()
-        if passed and self.gate < len(GATES):
+        if passed and self.gate < len(self.gates):
             self.gate += 1
             progress, _closeness, _passed = self._closest_progress()
-        finished = self.gate >= len(GATES)
+        finished = self.gate >= len(self.gates)
         delta = progress - self.prev_progress
         self.prev_progress = progress
         if delta > 1e-4:

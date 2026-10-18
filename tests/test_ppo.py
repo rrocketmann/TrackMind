@@ -14,6 +14,9 @@ from polytrack_agent.rl.checkpoint import bind_runtime, load_actor, read_checkpo
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.headless import HeadlessTrack
+from polytrack_agent.rl.summer1 import GATES as SUMMER1_GATES
+from polytrack_agent.rl.summer1 import START as SUMMER1_START
+from polytrack_agent.rl.summer1 import make_track
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.ppo import ppo_loss, ppo_update
 from polytrack_agent.rl.state import LapNumbers, obs_dim
@@ -267,3 +270,58 @@ def test_loaded_actor_presses_a_legal_chord(tmp_path):
     path = tmp_path / "actor.pt"
     torch.save(payload, path)
     assert read_checkpoint(path, torch.device("cpu"))["n_actions"] == 27
+
+
+def test_summer1_gates_follow_the_official_checkpoints():
+    marks = ((36.0, 0.0), (-36.0, 0.0), (-20.0, -16.0), (-60.0, 56.0))
+    positions = (SUMMER1_START, *SUMMER1_GATES)
+    cursor = 0
+    for mark in marks:
+        found = next(i for i in range(cursor, len(positions)) if positions[i] == mark)
+        cursor = found + 1
+    assert positions[-1] == (-60.0, 56.0)
+    assert len(SUMMER1_GATES) > len(marks)
+
+
+def test_summer1_aimed_line_reaches_the_finish():
+    import math
+
+    cfg = load_config(None)
+    cfg["rl"]["timeout_s"] = 80
+    cfg["rl"]["stuck_s"] = 40
+    env = make_track(cfg)
+    masks = action_masks(env.keys)
+
+    def hold(want: set[str]) -> int:
+        for index, mask in enumerate(masks):
+            if all(mask[key] == (key in want) for key in mask):
+                return index
+        raise AssertionError(want)
+
+    actions = {
+        "w": hold({"w"}),
+        "wa": hold({"w", "a"}),
+        "wd": hold({"w", "d"}),
+        "sa": hold({"s", "a"}),
+        "sd": hold({"s", "d"}),
+    }
+    info: dict = {}
+    for _ in range(2000):
+        gx, gy = env.gates[min(env.gate, len(env.gates) - 1)]
+        err = (math.atan2(gy - env.y, gx - env.x) - env.heading + math.pi) % (2 * math.pi) - math.pi
+        # Positive steer (d) decreases heading. Brake when the nose is far off
+        # so the point car can make the U-turn after checkpoint 1.
+        if abs(err) > 0.6:
+            action = actions["sa"] if err > 0 else actions["sd"]
+        elif err > 0.08:
+            action = actions["wa"]
+        elif err < -0.08:
+            action = actions["wd"]
+        else:
+            action = actions["w"]
+        _obs, _reward, done, info = env.step(action)
+        if done:
+            break
+    assert info.get("finished") is True
+    assert env.gate == len(env.gates)
+    env.close()

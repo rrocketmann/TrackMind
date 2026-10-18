@@ -24,12 +24,13 @@ from polytrack_agent.rl.state import LapNumbers, obs_dim
 log = logging.getLogger(__name__)
 
 
-def _meta(model: StateActorCritic, keys: list[str]) -> dict:
+def _meta(model: StateActorCritic, keys: list[str], track: str) -> dict:
     return {
         "obs_dim": int(model.obs_dim),
         "hidden": int(model.hidden),
         "n_actions": int(model.n_actions),
         "keys": list(keys),
+        "track": track,
     }
 
 
@@ -67,10 +68,13 @@ def _episode_gae(
     return np.concatenate(advantages), np.concatenate(returns)
 
 
-def _resume(path: Path, model: StateActorCritic, device: torch.device) -> bool:
+def _resume(path: Path, model: StateActorCritic, device: torch.device, track: str) -> bool:
     if not path.is_file():
         return False
     payload = read_checkpoint(path, device)
+    if payload.get("track") != track:
+        log.warning("Ignoring %s because it was trained on %s.", path, payload.get("track"))
+        return False
     if payload.get("arch") != ARCH or int(payload.get("n_actions") or -1) != model.n_actions:
         log.warning("Ignoring %s because it is a different actor.", path)
         return False
@@ -93,27 +97,35 @@ def train_ppo(
     env: PolyTrackVisionEnv | None = None,
     max_updates: int | None = None,
 ) -> dict:
-    """Drive Chromium and update the actor from a group of real laps.
+    """Update the policy and the value head on one track.
 
     The actor sees lap numbers only. Each press is scored with its own
-    advantage from the value head. The lap is a headless track of checkpoint
-    coordinates, so there is no display and no browser. Pass `env` only from
-    tests. `runs/ppo/last.pt` is loaded when it matches this actor.
+    advantage from the value head, and the PPO step trains both heads.
+    `rl.track: summer1` uses the official Summer 1 road. Pass `env` only
+    from tests. A checkpoint resumes only when its track matches.
     """
     rl_cfg = cfg["rl"]
     device = resolve_device(str(rl_cfg.get("device") or "auto"))
     hardware = configure_torch(device)
-    log.info("PPO device %s (%s)", device, hardware)
+    track = str(rl_cfg.get("track") or "summer1")
+    log.info("PPO device %s (%s) track %s", device, hardware, track)
     own_env = env is None
     if env is None:
         del reference
-        env = HeadlessTrack(cfg)
+        if track == "summer1":
+            from polytrack_agent.rl.summer1 import make_track
+
+            env = make_track(cfg)
+        elif track == "loop":
+            env = HeadlessTrack(cfg)
+        else:
+            raise ValueError(f"unknown rl.track {track!r}")
     chords = n_actions(env.keys)
     hidden = int(rl_cfg.get("hidden") or 128)
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
     out_dir = Path(rl_cfg.get("out_dir") or "runs/ppo")
     out_dir.mkdir(parents=True, exist_ok=True)
-    resumed = bool(rl_cfg.get("resume", True)) and _resume(out_dir / "last.pt", model, device)
+    resumed = bool(rl_cfg.get("resume", True)) and _resume(out_dir / "last.pt", model, device, track)
     if not resumed:
         model.bias_toward_forward(env.keys)
     model.eval()
@@ -124,7 +136,7 @@ def train_ppo(
     lam = float(rl_cfg.get("lam") or 0.95)
     value_coef = float(rl_cfg.get("value_coef") or 0.5)
     settle = float(rl_cfg.get("finish_settle_s") or 0.0)
-    meta = _meta(model, env.keys)
+    meta = _meta(model, env.keys, track)
     log_path = out_dir / "log.csv"
     best_progress = -1.0
     best_path = out_dir / "best.pt"
@@ -183,12 +195,12 @@ def train_ppo(
         mean_return = float(np.mean(returns_ep))
         updates += 1
         log.info(
-            "update %s  laps %s  return %.3f  progress %.3f  loss %.4f  value %.4f  entropy %.3f",
+            "update %s  laps %s  return %.3f  progress %.3f  policy %.4f  value %.4f  entropy %.3f",
             updates,
             len(returns_ep),
             mean_return,
             mean_progress,
-            stats["loss"],
+            stats["policy"],
             stats["value"],
             stats["entropy"],
         )

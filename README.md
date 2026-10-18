@@ -90,7 +90,9 @@ Arrow keys, or `space` if your build actually uses it, go in `record.keys`. Do n
 python scripts/train.py
 ```
 
-Training is headless. There is no browser, no capture, and no reference lap. The car is a point on a track of checkpoint coordinates. The reward goes up as it gets closer to the next checkpoint and by one more when it reaches that checkpoint. PPO collects 4 laps, then updates the numeric actor and the value head. Checkpoints go to `runs/ppo/`. `last.pt` is resumed on the next run when the observation layout matches, and `best.pt` is the highest mean progress. `runs/ppo/log.csv` is the update log. Ctrl+C stops the run.
+Training is headless. There is no browser and no capture. The course is a centerline through the official Summer 1 road from PolyTrack 0.6.3 `summer1.track`: the start, the three checkpoint tiles, and the finish. The 48 points are samples along that road, not the three yellow gates. The car is a point on that grid. It has no grip, gravity, or slopes, so a simulated second is not a lap time. The reward goes up as the point gets closer to the next sample and by one more when it reaches that sample. Each PPO update trains the policy head and the value head. Checkpoints go to `runs/summer1/`. `last.pt` resumes only when its track matches, and `best.pt` is the highest mean progress. `runs/summer1/log.csv` is the update log. Ctrl+C stops the run.
+
+Later: do not extend this point car. Trackmania agents (`tmrl`, Linesight) leave physics to the real game. The next trainer should do the same with the official PolyTrack window: keys in, the game moves the car, reward from the three checkpoint gates. Soft Actor-Critic is the usual learner there. This headless run cannot supply that.
 
 ## Offline agreement
 
