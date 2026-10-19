@@ -159,8 +159,8 @@ function patchWorker(source) {
       "void 0;globalThis.__step=c;",
     ],
     [
-      "onmessage=i;",
-      `onmessage=(event)=>{try{i(event)}catch(error){postMessage({messageType:-1,error:String(error&&error.stack||error)})}};globalThis.__step=c;postMessage({messageType:-2});`,
+      "onmessage = i;",
+      `onmessage = (event) => { try { i(event) } catch (error) { postMessage({ messageType: -1, error: String(error && error.stack || error) }) } }; globalThis.__step = c; postMessage({ messageType: -2 });`,
     ],
   ];
   let patched = `var onmessage;\nvar postMessage = globalThis.postMessage;\nvar self = globalThis;\n${source}`;
