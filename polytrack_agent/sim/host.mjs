@@ -147,44 +147,20 @@ function ppmToVideoFrame(b64ppm) {
 function patchWorker(source) {
   const replacements = [
     [
-      "case Ki.CreateCar:",
-      `case 11: {
-        const exported = Ko.fromExportString(r.trackData);
-        const track = exported && exported.trackData;
-        if (null == track || typeof track.toSaveString !== "function") throw new Error("Failed to load track");
-        const save = track.toSaveString();
-        const loaded = Ko.fromSaveString(save);
-        if (null == loaded) throw new Error("Failed to load track");
-        const bounds = track.getBounds();
-        const seen = new Set();
-        const placed = [];
-        track.forEachPart((x, y, z, type, rotation, axis, color, checkpointOrder) => {
-          if (checkpointOrder != null) seen.add(checkpointOrder);
-          placed.push([x, y, z, type, rotation, axis, checkpointOrder == null ? -1 : checkpointOrder]);
-        });
-        postMessage({
-          messageType: 11,
-          bounds: { minX: bounds.min.x, minY: bounds.min.y, maxX: bounds.max.x, maxY: bounds.max.y },
-          checkpointCount: seen.size,
-          parts: placed,
-          save
-        });
-        break;
-      }
-      case Ki.CreateCar:`,
+                    "case X_.CreateCar:\n                        !function(e) {\n                            const i = sw.fromSaveString(e.data.trackData);",
+                    `case X_.CreateCar: {\n                        const exported = sw.fromSaveString(r.trackData);\n                        const track = exported;\n                        if (null == track) throw new Error("Failed to load track");\n                        const bounds = track.getBounds();\n                        const seen = new Set();\n                        const placed = [];\n                        track.forEachPart((x, y, z, type, rotation, axis, color, checkpointOrder) => {\n                          if (checkpointOrder != null) seen.add(checkpointOrder);\n                          placed.push([x, y, z, type, rotation, axis, checkpointOrder == null ? -1 : checkpointOrder]);\n                        });\n                        postMessage({\n                          messageType: 11,\n                          bounds: { minX: bounds.min.x, minY: bounds.min.y, maxX: bounds.max.x, maxY: bounds.max.y },\n                          checkpointCount: seen.size,\n                          parts: placed,\n                          save: r.trackData\n                        });\n                        !function(e) {\n                            const i = sw.fromSaveString(e.data.trackData);`,
     ],
     [
-      "const e=Math.max(0,i-a);let r=s.frames+e;",
-      "const e=0;let r=s.frames;",
+      "                        }(e);\n                        break;\n                    case X_.DeleteCar:",
+      "                        }(e);\n                        break;\n                    }\n                    case X_.DeleteCar:",
     ],
     [
-      "if(t.frames<Qa.maxFrames&&t.frames<t.targetSimulationFrames&&!t.isPaused){const e=t.controls.getControls(t.frames);i.push(n(t,e)),t.frames++,r=!1}",
-      `if(t.frames<Qa.maxFrames&&t.frames<t.targetSimulationFrames&&!t.isPaused){let controls;if(t.userControls!=null){while(t.userControls.buffer.length>0&&t.userControls.buffer[0].frame<=t.frames){const ctl=t.userControls.buffer.shift();if(ctl!=null){t.userControls.up=ctl.up;t.userControls.right=ctl.right;t.userControls.down=ctl.down;t.userControls.left=ctl.left;t.userControls.reset=ctl.reset}}controls={up:t.userControls.up,right:t.userControls.right,down:t.userControls.down,left:t.userControls.left,reset:t.userControls.reset}}else controls=t.controls.getControls(t.frames);i.push(n(t,controls)),t.frames++,r=!1}`,
+      "setInterval(c)",
+      "void 0;globalThis.__step=c;",
     ],
-    ["setInterval(h)", "void 0"],
     [
-      "$o.length=0,onmessage=r;",
-      `$o.length=0,onmessage=(event)=>{try{r(event)}catch(error){postMessage({messageType:-1,error:String(error&&error.stack||error)})}};globalThis.__step=h;postMessage({messageType:-2});`,
+      "onmessage=i;",
+      `onmessage=(event)=>{try{i(event)}catch(error){postMessage({messageType:-1,error:String(error&&error.stack||error)})}};globalThis.__step=c;postMessage({messageType:-2});`,
     ],
   ];
   let patched = `var onmessage;\nvar postMessage = globalThis.postMessage;\nvar self = globalThis;\n${source}`;
@@ -476,7 +452,7 @@ function boot(command) {
         carMassOffset: massOffset,
       },
     });
-    workerMessage({ data: { messageType: 11, trackData: trackText } });
+    workerMessage({ data: { messageType: 3, trackData: trackText } });
     if (!boundsMessage) fail("track did not report its bounds");
     mountain = mountains(boundsMessage.bounds, table);
     checkpointCount = boundsMessage.checkpointCount;
