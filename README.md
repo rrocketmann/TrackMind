@@ -101,6 +101,11 @@ ffplay -autoexit runs/summer1/gate.mp4
 
 The recorder needs `ffmpeg`, `xvfb-run`/`Xvfb`, and a Chromium or Chrome binary. It does not open or read the local schoolagy simulation — it records the official page directly. The program still does not submit a leaderboard time.
 
+If PolyTrack shows "encountered an unexpected error":
+- Make sure Chrome is **not** launched with `--disable-gpu` — PolyTrack needs WebGL. The recorder uses `--use-gl=swiftshader` for software rendering.
+- Run from a machine with a real display and GPU if possible; Xvfb software rendering can be unstable.
+- Check the console output — the recorder prints PolyTrack's page errors under `[page console error]` / `[page exception]`.
+
 `runs/summer1/last.pt` is the actor saved with that lap. It is `schoolagy-ppo-v1`, 24 inputs, progress 1.03, and it had not taken a PPO step yet. `runs/summer1/best.pt` is an earlier 21-input actor from update 18. The current observation does not load it.
 
 `POLYTRACK_ROOT` overrides `game.root`. Both commands also take `--config some.yaml`, merged onto `polytrack_agent/default_config.yaml`. Useful fields:
