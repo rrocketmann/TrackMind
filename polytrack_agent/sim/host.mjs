@@ -199,7 +199,7 @@ function patchWorker(source) {
 
 function rngTable(mainBundle) {
   const text = fs.readFileSync(mainBundle, "utf8");
-  const valueAt = text.indexOf("value:[.120477647");
+  const valueAt = text.indexOf("value: [.120477647");
   if (valueAt < 0) throw new Error("mountain random table is missing from main.bundle.js");
   const end = text.indexOf("]", valueAt);
   return vm.runInThisContext(`(${text.slice(valueAt + "value:".length, end + 1)})`);
