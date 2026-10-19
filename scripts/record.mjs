@@ -159,7 +159,7 @@ process.on("SIGTERM", cleanup);
     `--display=${DISPLAY}`,
     "--no-sandbox",
     "--disable-setuid-sandbox",
-    "--use-gl=swiftshader",
+    "--disable-gpu",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-dev-shm-usage",
