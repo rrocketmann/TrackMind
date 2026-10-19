@@ -101,6 +101,8 @@ class SimClient:
         except RuntimeError:
             pass
         try:
-            self._proc.wait(timeout=2)
+            self._proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
+            pass
+        if self._proc.poll() is None:
             self._proc.kill()
