@@ -66,6 +66,8 @@ ffplay -autoexit https://github.com/rrocketmann/TrackMind/raw/refs/heads/main/ru
 
 [runs/summer1/gate.mp4](runs/summer1/gate.mp4) is the chase-camera lap that first cleared Summer 1 checkpoint 1. It is 30 seconds. The car leaves the start, takes the S-bend, and goes under the yellow gate at 28.2 s.
 
+This video was recorded from the **schoolagy PolyTrack 0.6.3 simulation** that this agent drives, not from the official kodub page. The program does not open `kodub.com/apps/polytrack`, read its memory, or submit a leaderboard time — so a "real polytrack" recording has to be made on a machine with a display and a browser pointed at that page.
+
 There is no display on the training machine, so play the file where you have a screen:
 
 ```bash
@@ -75,8 +77,17 @@ ffplay -autoexit runs/summer1/gate.mp4
 From another computer, without cloning:
 
 ```bash
-ffplay -autoexit https://github.com/rrocketmann/polytrack-agent/raw/refs/heads/main/runs/summer1/gate.mp4
+ffplay -autoexit https://github.com/rrocketmann/TrackMind/raw/refs/heads/main/runs/summer1/gate.mp4
 ```
+
+To record the real PolyTrack yourself, run the game in headed Chromium/Chrome at `kodub.com/apps/polytrack`, load a Summer 1-style track, and capture the window with `ffmpeg` while the car drives:
+
+```bash
+# Example: Linux/X11, 1080p30 capture of the whole screen
+ffmpeg -f x11grab -framerate 30 -video_size 1920x1080 -i :0.0 -c:v libx264 -preset veryfast -crf 23 real_polytrack.mp4
+```
+
+Stop with `q`, then replace `runs/summer1/gate.mp4` with your file and re-run `ffplay` to verify.
 
 `runs/summer1/last.pt` is the actor saved with that lap. It is `schoolagy-ppo-v1`, 24 inputs, progress 1.03, and it had not taken a PPO step yet. `runs/summer1/best.pt` is an earlier 21-input actor from update 18. The current observation does not load it.
 
