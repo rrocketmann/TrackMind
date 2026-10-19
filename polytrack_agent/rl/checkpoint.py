@@ -45,8 +45,9 @@ def bind_runtime(cfg: dict, payload: dict[str, Any]) -> dict:
 
 
 def load_actor(payload: dict[str, Any], device: torch.device) -> StateActorCritic:
-    if payload.get("arch") != ARCH:
-        raise ValueError(f"expected {ARCH}, got {payload.get('arch')}")
+    arch = payload.get("arch")
+    if arch not in (ARCH, "schoolagy-ppo-v1"):
+        raise ValueError(f"expected {ARCH} or schoolagy-ppo-v1, got {arch}")
     model = StateActorCritic(
         obs_dim=int(payload["obs_dim"]),
         n_actions=int(payload["n_actions"]),
