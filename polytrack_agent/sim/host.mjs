@@ -12,6 +12,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const MASS_OFFSET = 0.6;
 const PART_SIZE = 5;
 
+const VIDEO_W = 640;
+const VIDEO_H = 480;
+const VIDEO_FPS = 30;
+
+let recording = false;
+let videoFrames = [];
+
 function write(message) {
   fs.writeSync(1, `${JSON.stringify(message)}\n`);
 }
@@ -19,6 +26,122 @@ function write(message) {
 function fail(error) {
   write({ type: "error", error: String(error && error.stack ? error.stack : error) });
   process.exit(1);
+}
+
+function quaternionYaw(q) {
+  // Extract yaw (Z rotation) from a quaternion {x, y, z, w}
+  const siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+  const cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+  return Math.atan2(siny_cosp, cosy_cosp);
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+// Render a top-down PPM frame of the current simulation state.
+// PPM is a trivial raw RGB format that ffmpeg can encode directly.
+function renderFrame(state) {
+  const w = VIDEO_W;
+  const h = VIDEO_H;
+  const px = new Uint8ClampedArray(w * h * 4);
+  const idx = (x, y) => (y * w + x) * 4;
+
+  // Background
+  for (let i = 0; i < px.length; i += 4) {
+    px[i] = 42;     px[i + 1] = 42;     px[i + 2] = 42;     px[i + 3] = 255;
+  }
+
+  const cx = w / 2;
+  const cy = h / 2;
+  const scale = 12; // pixels per unit
+
+  // Draw track parts from bounds/parts if available
+  // Parts are [x, y, z, type, rotation, axis, checkpointOrder]
+  if (window.__trackParts) {
+    for (const part of window.__trackParts) {
+      const px_ = cx + part[0] * scale;
+      const py_ = cy - part[1] * scale;
+      const size = 6;
+      const type = part[3] || 0;
+      let r = 80, g = 80, b = 80;
+      if (type === 1) { r = 100; g = 100; b = 100; }      // road
+      if (type === 2) { r = 40; g = 120; b = 40; }        // grass
+      if (type === 3) { r = 200; g = 200; b = 50; }       // checkpoint
+      if (part[6] != null && part[6] >= 0) { r = 255; g = 215; b = 0; } // checkpoint marker
+      const half = size / 2;
+      for (let dy = -half; dy <= half; dy++) {
+        for (let dx = -half; dx <= half; dx++) {
+          const ix = Math.round(px_ + dx);
+          const iy = Math.round(py_ + dy);
+          if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
+            const i = idx(ix, iy);
+            px[i] = r; px[i + 1] = g; px[i + 2] = b;
+          }
+        }
+      }
+    }
+  }
+
+  // Draw car
+  const carX = cx + state.position.x * scale;
+  const carY = cy - state.position.z * scale;
+  const yaw = quaternionYaw(state.quaternion);
+  const carLen = 14;
+  const carWid = 8;
+  const corners = [
+    { x: carLen / 2, y: carWid / 2 },
+    { x: carLen / 2, y: -carWid / 2 },
+    { x: -carLen / 2, y: -carWid / 2 },
+    { x: -carLen / 2, y: carWid / 2 },
+  ];
+  // Filled polygon via scanline-ish approach: draw thick line segments
+  for (let t = 0; t < 1; t += 0.02) {
+    const ax = corners[0].x * (1 - t) + corners[1].x * t;
+    const ay = corners[0].y * (1 - t) + corners[1].y * t;
+    const bx = corners[2].x * (1 - t) + corners[3].x * t;
+    const by = corners[2].y * (1 - t) + corners[3].y * t;
+    for (let s = 0; s <= 1; s += 0.1) {
+      const fx = ax * (1 - s) + bx * s;
+      const fy = ay * (1 - s) + by * s;
+      const rx = carX + fx * Math.cos(yaw) - fy * Math.sin(yaw);
+      const ry = carY + fx * Math.sin(yaw) + fy * Math.cos(yaw);
+      const ix = Math.round(rx);
+      const iy = Math.round(ry);
+      if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
+        const i = idx(ix, iy);
+        px[i] = 50; px[i + 1] = 150; px[i + 2] = 255;
+      }
+    }
+  }
+  // Car heading indicator
+  const hx = carX + 16 * Math.cos(yaw);
+  const hy = carY + 16 * Math.sin(yaw);
+  for (let d = 0; d <= 16; d += 2) {
+    const ix = Math.round(carX + d * Math.cos(yaw));
+    const iy = Math.round(carY + d * Math.sin(yaw));
+    if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
+      const i = idx(ix, iy);
+      px[i] = 255; px[i + 1] = 50; px[i + 2] = 50;
+    }
+  }
+
+  // UI text overlay: speed and frames (simple pixel text is too complex, skip)
+
+  // Encode PPM
+  const header = Buffer.from(`P6\n${w} ${h}\n255\n`, "ascii");
+  const rgb = Buffer.alloc(w * h * 3);
+  let ri = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    rgb[ri++] = px[i];
+    rgb[ri++] = px[i + 1];
+    rgb[ri++] = px[i + 2];
+  }
+  return Buffer.concat([header, rgb]).toString("base64");
+}
+
+function ppmToVideoFrame(b64ppm) {
+  return b64ppm; // ffmpeg will handle rawvideo input
 }
 
 function patchWorker(source) {
@@ -240,7 +363,12 @@ function postMessage(message) {
     const state = decodeCarState(message.carStateBuffers[message.carStateBuffers.length - 1]);
     if (waiting && state.frames >= waiting) {
       waiting = null;
-      write({ type: "state", state, checkpointCount });
+      const out = { type: "state", state, checkpointCount };
+      if (recording) {
+        out.frame = renderFrame(state);
+        videoFrames.push(out.frame);
+      }
+      write(out);
     }
   }
 }
@@ -353,6 +481,7 @@ function boot(command) {
     mountain = mountains(boundsMessage.bounds, table);
     checkpointCount = boundsMessage.checkpointCount;
     trackText = boundsMessage.save;
+    window.__trackParts = boundsMessage.parts || [];
     write({
       type: "ready",
       checkpointCount,
@@ -421,6 +550,17 @@ commands.on("line", (line) => {
     if (command.cmd === "boot") boot(command);
     else if (command.cmd === "reset") commandReset();
     else if (command.cmd === "step") commandStep(command);
+    else if (command.cmd === "record") {
+      recording = command.enable !== false;
+      if (recording) videoFrames = [];
+      write({ type: "ack", cmd: "record", recording });
+    }
+    else if (command.cmd === "flush-video") {
+      const frames = videoFrames;
+      videoFrames = [];
+      recording = false;
+      write({ type: "video-frames", count: frames.length, frames });
+    }
     else if (command.cmd === "close") process.exit(0);
     else fail(`unknown command ${command.cmd}`);
   } catch (error) {

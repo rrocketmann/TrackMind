@@ -1,4 +1,4 @@
-// Ask the schoolagy PolyTrack page for the physics meshes it already builds.
+// Ask the polytrack fork page for the physics meshes it already builds.
 // The simulation worker receives those meshes in its Init message. This saves
 // that payload so training can start the worker without opening the page again.
 
@@ -13,7 +13,7 @@ const root = path.resolve(process.argv[2] || process.env.POLYTRACK_ROOT || "");
 const out = process.argv[3] || path.resolve("polytrack_agent/sim/cache/track_parts.json");
 
 if (!process.argv[2] && !process.env.POLYTRACK_ROOT) {
-  console.error("Set POLYTRACK_ROOT, or pass the schoolagy polytrack directory as the first argument.");
+  console.error("Set POLYTRACK_ROOT, or pass the polytrack fork directory as the first argument.");
   process.exit(1);
 }
 if (!fs.existsSync(path.join(root, "index.html"))) {

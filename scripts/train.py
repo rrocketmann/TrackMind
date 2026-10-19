@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train PPO on the schoolagy PolyTrack 0.6.3 simulation."""
+"""Train PPO on the PolyTrack 0.6.3 fork simulation."""
 
 import sys
 from pathlib import Path

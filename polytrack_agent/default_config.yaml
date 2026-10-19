@@ -1,4 +1,4 @@
-# PPO on the PolyTrack 0.6.3 web build in schoolagy/polytrack-0.6.3.
+# PPO on the PolyTrack 0.6.3 fork build at polytrack-0.6.3.
 # POLYTRACK_ROOT is that directory. The car is polytrack_physics.wasm.
 
 game:

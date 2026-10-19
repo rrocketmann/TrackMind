@@ -1,4 +1,4 @@
-"""One car in the schoolagy PolyTrack 0.6.3 simulation.
+"""One car in the PolyTrack 0.6.3 fork simulation.
 
 The Node host steps the game's own worker. This class turns a chord into
 up/down/left/right and scores progress from the car state the worker returns.
@@ -76,11 +76,11 @@ def gate_points(parts: list, detectors: dict[int, dict]) -> tuple[list[tuple[flo
 
 
 def game_root(cfg: dict) -> Path:
-    """Directory that contains the schoolagy simulation worker."""
+    """Directory that contains the polytrack fork worker."""
     raw = os.environ.get("POLYTRACK_ROOT") or (cfg.get("game") or {}).get("root")
     if not raw:
         raise ValueError(
-            "Set POLYTRACK_ROOT to the schoolagy polytrack directory, or set game.root in --config."
+            "Set POLYTRACK_ROOT to the polytrack fork directory, or set game.root in --config."
         )
     root = Path(raw).expanduser().resolve()
     worker = root / "simulation_worker.bundle.js"

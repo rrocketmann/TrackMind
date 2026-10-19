@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import threading
@@ -27,6 +28,8 @@ class SimClient:
         self.checkpoint_count = int(ready["checkpointCount"])
         self.parts = ready.get("parts") or []
         self.frames = 0
+        self._recording = False
+        self._video_frames: list[str] = []
 
     def _read_errors(self, pipe) -> None:
         for line in pipe:
@@ -54,10 +57,31 @@ class SimClient:
             message = json.loads(line)
             if message.get("type") == "error":
                 raise RuntimeError(message["error"])
+            if message.get("type") == "video-frames":
+                # Flushed video frames from the host
+                self._video_frames.extend(message.get("frames", []))
+                continue
             if message.get("type") == kind:
                 if kind == "state":
                     self.frames = int(message["state"]["frames"])
+                    if self._recording and message.get("frame"):
+                        self._video_frames.append(message["frame"])
                 return message
+
+    def start_recording(self) -> None:
+        self._video_frames = []
+        self._send({"cmd": "record", "enable": True})
+        self._recording = True
+        # Drain any ack
+        self._expect("ack")
+
+    def stop_recording(self) -> list[str]:
+        self._send({"cmd": "flush-video"})
+        self._recording = False
+        self._expect("video-frames")
+        frames = list(self._video_frames)
+        self._video_frames = []
+        return frames
 
     def reset(self) -> dict:
         self._send({"cmd": "reset"})

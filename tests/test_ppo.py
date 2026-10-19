@@ -1,4 +1,4 @@
-"""PPO pieces, plus one short lap on the schoolagy simulation when it is present."""
+"""PPO pieces, plus one short lap on the polytrack fork simulation when it is present."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def _sim_ready() -> bool:
 
 def test_throttle_moves_the_sim_car():
     if not _sim_ready():
-        pytest.skip("schoolagy simulation or the mesh cache is not available")
+        pytest.skip("polytrack fork simulation or the mesh cache is not available")
     cfg = load_config(None)
     cfg["rl"]["action_repeat"] = 200
     env = make_track(cfg)
@@ -132,7 +132,7 @@ def test_throttle_moves_the_sim_car():
 
 def test_one_ppo_update_on_the_sim(tmp_path):
     if not _sim_ready():
-        pytest.skip("schoolagy simulation or the mesh cache is not available")
+        pytest.skip("polytrack fork simulation or the mesh cache is not available")
     cfg = load_config(None)
     cfg["rl"]["out_dir"] = str(tmp_path / "run")
     cfg["rl"]["group_size"] = 2
@@ -146,7 +146,7 @@ def test_one_ppo_update_on_the_sim(tmp_path):
     report = train_ppo(cfg, max_updates=1)
     assert report["updates"] == 1
     payload = read_checkpoint(tmp_path / "run" / "last.pt", torch.device("cpu"))
-    assert payload["arch"] == ARCH == "schoolagy-ppo-0.6.3"
+    assert payload["arch"] == ARCH == "polytrack-ppo-0.6.3"
     assert payload["track"] == "summer1"
     assert payload["n_actions"] == 9
     assert payload["obs_dim"] == obs_dim(9)

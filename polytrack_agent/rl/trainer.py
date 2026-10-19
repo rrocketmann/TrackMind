@@ -1,4 +1,4 @@
-"""Online PPO on the schoolagy PolyTrack 0.6.3 simulation."""
+"""Online PPO on the PolyTrack 0.6.3 fork simulation."""
 
 from __future__ import annotations
 
