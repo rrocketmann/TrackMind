@@ -80,14 +80,20 @@ From another computer, without cloning:
 ffplay -autoexit https://github.com/rrocketmann/TrackMind/raw/refs/heads/main/runs/summer1/gate.mp4
 ```
 
-To record the real PolyTrack yourself, run the game in headed Chromium/Chrome at `kodub.com/apps/polytrack`, load a Summer 1-style track, and capture the window with `ffmpeg` while the car drives:
+To record the real PolyTrack yourself, use `scripts/record.mjs`. It launches Chromium on a virtual X display (Xvfb) and grabs that display with ffmpeg, so it works from an SSH session with no physical monitor. The car drives forward by holding W; steer manually if needed.
 
 ```bash
-# Example: Linux/X11, 1080p30 capture of the whole screen
-ffmpeg -f x11grab -framerate 30 -video_size 1920x1080 -i :0.0 -c:v libx264 -preset veryfast -crf 23 real_polytrack.mp4
+export POLYTRACK_URL=https://www.kodub.com/apps/polytrack   # optional, defaults to kodub
+CHROME=/usr/bin/google-chrome node scripts/record.mjs runs/real_polytrack.mp4
 ```
 
-Stop with `q`, then replace `runs/summer1/gate.mp4` with your file and re-run `ffplay` to verify.
+Press Ctrl+C to stop. The script writes `runs/real_polytrack.mp4` (or the path you pass). Replace `runs/summer1/gate.mp4` with your file and re-run `ffplay` to verify:
+
+```bash
+ffplay -autoexit runs/summer1/gate.mp4
+```
+
+The recorder needs `ffmpeg`, `xvfb-run`/`Xvfb`, and a Chromium or Chrome binary. It does not open or read the local schoolagy simulation — it records the official page directly. The program still does not submit a leaderboard time.
 
 `runs/summer1/last.pt` is the actor saved with that lap. It is `schoolagy-ppo-v1`, 24 inputs, progress 1.03, and it had not taken a PPO step yet. `runs/summer1/best.pt` is an earlier 21-input actor from update 18. The current observation does not load it.
 
@@ -113,6 +119,7 @@ The default track is `tracks/official/summer1.track`. Any other official or comm
 polytrack_agent/sim/     Node host, Python client, generated mesh cache
 polytrack_agent/rl/      observation, track env, PPO
 scripts/dump_parts.mjs   one-time mesh dump
+scripts/record.mjs       record the real PolyTrack page (Xvfb + ffmpeg)
 scripts/train.py
 scripts/play.py
 ```
