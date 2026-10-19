@@ -87,7 +87,13 @@ export POLYTRACK_URL=https://www.kodub.com/apps/polytrack   # optional, defaults
 CHROME=/usr/bin/google-chrome node scripts/record.mjs runs/real_polytrack.mp4
 ```
 
-Press Ctrl+C to stop. The script writes `runs/real_polytrack.mp4` (or the path you pass). Replace `runs/summer1/gate.mp4` with your file and re-run `ffplay` to verify:
+Press Ctrl+C to stop. The script writes `runs/real_polytrack.mp4` (or the path you pass). Play it where you have a screen:
+
+```bash
+ffplay -autoexit runs/real_polytrack.mp4
+```
+
+A sample real-PolyTrack recording is already committed at `runs/real_polytrack.mp4` (15 s). The schoolagy simulation gate pass remains at `runs/summer1/gate.mp4`:
 
 ```bash
 ffplay -autoexit runs/summer1/gate.mp4

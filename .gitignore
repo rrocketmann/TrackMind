@@ -4,7 +4,6 @@ __pycache__/
 .venv/
 venv/
 data/
-runs/
 shots/
 *.pt
 config.local.yaml

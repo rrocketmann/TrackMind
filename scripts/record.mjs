@@ -81,13 +81,27 @@ function send(method, params = {}, sessionId) {
 }
 
 function cleanup() {
-  for (const proc of [ffmpeg, browser, xvfb]) {
+  console.log("\nStopping recorder...");
+  // Close the WebDriver key first so the car stops, then shut down ffmpeg
+  // cleanly so it can finalize the MP4 moov atom.
+  if (ws && sessionId) {
+    try {
+      send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "w",
+        code: "KeyW",
+        windowsVirtualKeyCode: 87,
+        nativeVirtualKeyCode: 87,
+      }, sessionId);
+    } catch {}
+  }
+  for (const proc of [browser, ffmpeg, xvfb]) {
     if (proc && !proc.killed) {
       try { proc.kill("SIGTERM"); } catch {}
     }
   }
   if (ws) ws.close();
-  console.log("\nRecorder stopped.");
+  console.log("Recorder stopped.");
 }
 
 process.on("SIGINT", cleanup);
@@ -102,8 +116,16 @@ process.on("SIGTERM", cleanup);
   });
   xvfb.on("exit", (code) => console.log(`Xvfb exited with ${code}`));
 
-  // Wait for Xvfb to be ready.
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  // Wait for Xvfb to be ready (X socket must exist).
+  console.log(`Waiting for Xvfb display ${DISPLAY} ...`);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      fs.accessSync(`/tmp/.X11-unix/X${DISPLAY.replace(":", "")}`);
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
 
   // 2. ffmpeg screen grab of the virtual display.
   console.log(`Recording to ${OUT} ...`);
@@ -115,6 +137,7 @@ process.on("SIGTERM", cleanup);
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "23",
+    "-movflags", "frag_keyframe+empty_moov",
     "-y",
     OUT,
   ], {
