@@ -50,6 +50,18 @@ python scripts/play.py --episodes 5
 
 `scripts/train.py` runs until you stop it. It writes `runs/summer1/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/summer1/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode.
 
+On an SSH machine with no display, `play.py` cannot open a window. Watch the chase-camera gate pass with `ffplay` instead:
+
+```bash
+ffplay -autoexit runs/summer1/gate.mp4
+```
+
+From another computer, without cloning:
+
+```bash
+ffplay -autoexit https://github.com/rrocketmann/TrackMind/raw/refs/heads/main/runs/summer1/gate.mp4
+```
+
 ## First checkpoint
 
 [runs/summer1/gate.mp4](runs/summer1/gate.mp4) is the chase-camera lap that first cleared Summer 1 checkpoint 1. It is 30 seconds. The car leaves the start, takes the S-bend, and goes under the yellow gate at 28.2 s.
