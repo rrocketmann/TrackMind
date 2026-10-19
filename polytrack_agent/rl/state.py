@@ -8,7 +8,7 @@ import numpy as np
 
 # speed, quaternion, upright, forward xz, wheels down, checkpoint, height, airborne,
 # then where the next gate sits in the car frame: right, forward, distance.
-FEATURES = 15
+FEATURES = 12
 
 
 def obs_dim(n_actions: int) -> int:
@@ -55,9 +55,6 @@ def _features(state: dict) -> list[float]:
         float(state["nextCheckpointIndex"]) / max(1.0, checkpoints),
         float(position.get("y") or 0.0) / 20.0,
         1.0 if contact == 0.0 else 0.0,
-        local_right / 80.0,
-        local_forward / 80.0,
-        distance / 80.0,
     ]
 
 

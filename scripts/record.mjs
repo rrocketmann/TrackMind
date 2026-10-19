@@ -134,7 +134,7 @@ process.on("SIGTERM", cleanup);
     "-framerate", String(FPS),
     "-video_size", `${WIDTH}x${HEIGHT}`,
     "-i", DISPLAY + ".0",
-    "-c:v", "libx264",
+    "-c:v", "libopenh264",
     "-preset", "veryfast",
     "-crf", "23",
     "-movflags", "frag_keyframe+empty_moov",
