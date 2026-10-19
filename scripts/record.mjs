@@ -151,14 +151,15 @@ process.on("SIGTERM", cleanup);
   });
 
   // 3. Chromium on the virtual display, headed so it renders.
+  //    PolyTrack is a WebGL game: --disable-gpu breaks it. Use swiftshader
+  //    software rendering instead so WebGL works on a headless Xvfb display.
   const debugPort = 9222;
   console.log(`Launching Chromium at ${URL} ...`);
   browser = spawn(chrome, [
     `--display=${DISPLAY}`,
     "--no-sandbox",
     "--disable-setuid-sandbox",
-    "--disable-gpu",
-    "--disable-software-rasterizer",
+    "--use-gl=swiftshader",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-dev-shm-usage",
@@ -199,6 +200,16 @@ process.on("SIGTERM", cleanup);
     if (message.id && pending.has(message.id)) {
       pending.get(message.id)(message);
       pending.delete(message.id);
+    }
+    // Surface PolyTrack / page console errors so we can see what went wrong.
+    if (message.method === "Runtime.consoleAPICalled") {
+      const args = (message.params.args || []).map((a) => a.value || a.description || String(a));
+      if (message.params.executionContextId) {
+        console.log(`[page console ${message.params.type}] ${args.join(" ")}`);
+      }
+    }
+    if (message.method === "Runtime.exceptionThrown") {
+      console.error(`[page exception] ${message.params.exceptionDetails.text}`);
     }
   });
 
