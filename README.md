@@ -10,12 +10,13 @@ PPO on the PolyTrack 0.6.3 car in the schoolagy web build at `polytrack-0.6.3`. 
 
 Each decision holds W, A, S, and D for 50 physics frames (50 ms). The worker ticks at 1 ms. Those four keys are the whole control set. Air pitch and roll reuse them while the car is off the ground. The nine actions are the exclusive combinations: throttle or brake or neither, and left or right or straight. Restart is not an action. An episode reset deletes the car and creates it at the start. The in-game respawn key would put the car back on the last checkpoint, so the trainer does not send it.
 
-The observation is twelve numbers plus a one-hot of the previous action:
+The observation is fifteen numbers plus a one-hot of the previous action:
 
 - speed, quaternion, upright, and the body's forward direction on the ground plane
 - fraction of wheels in contact, and whether the car is airborne
 - next checkpoint divided by the checkpoint count
 - height
+- where the next gate sits in the car frame: right, forward, and distance
 
 Reward is the change in progress, minus a small time penalty, plus a bonus on the finish. Progress is the checkpoint index plus how far the car has driven since that checkpoint, capped just short of the next index. A finish scores one past the last checkpoint. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, or the time limit.
 
@@ -48,6 +49,24 @@ python scripts/play.py --episodes 5
 ```
 
 `scripts/train.py` runs until you stop it. It writes `runs/summer1/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/summer1/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode.
+
+## First checkpoint
+
+[runs/summer1/gate.mp4](runs/summer1/gate.mp4) is the chase-camera lap that first cleared Summer 1 checkpoint 1. It is 30 seconds. The car leaves the start, takes the S-bend, and goes under the yellow gate at 28.2 s.
+
+There is no display on the training machine, so play the file where you have a screen:
+
+```bash
+ffplay -autoexit runs/summer1/gate.mp4
+```
+
+From another computer, without cloning:
+
+```bash
+ffplay -autoexit https://github.com/rrocketmann/polytrack-agent/raw/refs/heads/main/runs/summer1/gate.mp4
+```
+
+`runs/summer1/last.pt` is the actor saved with that lap. It is `schoolagy-ppo-v1`, 24 inputs, progress 1.03, and it had not taken a PPO step yet. `runs/summer1/best.pt` is an earlier 21-input actor from update 18. The current observation does not load it.
 
 `POLYTRACK_ROOT` overrides `game.root`. Both commands also take `--config some.yaml`, merged onto `polytrack_agent/default_config.yaml`. Useful fields:
 

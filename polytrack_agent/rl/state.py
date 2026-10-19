@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
-# speed, quaternion, upright, forward xz, wheels down, checkpoint, height, airborne.
-FEATURES = 12
+# speed, quaternion, upright, forward xz, wheels down, checkpoint, height, airborne,
+# then where the next gate sits in the car frame: right, forward, distance.
+FEATURES = 15
 
 
 def obs_dim(n_actions: int) -> int:
@@ -26,6 +29,19 @@ def _features(state: dict) -> list[float]:
     wheels = state.get("wheels") or []
     contact = sum(1.0 for wheel in wheels if wheel) / 4.0
     checkpoints = float(state.get("checkpointCount") or 3)
+    # +X of the body is the driver's right. Positive `right` means the gate is that way.
+    right_x = 1.0 - 2.0 * (y * y + z * z)
+    right_z = 2.0 * (x * z - w * y)
+    position = state["position"]
+    px = float(position.get("x") or 0.0)
+    pz = float(position.get("z") or 0.0)
+    target = state.get("target") or {"x": px, "z": pz}
+    dx = float(target["x"]) - px
+    dz = float(target["z"]) - pz
+    # The body's +Z is forward, and its +X points to the driver's left in this sim.
+    local_right = -(dx * right_x + dz * right_z)
+    local_forward = dx * forward_x + dz * forward_z
+    distance = math.hypot(dx, dz)
     return [
         float(state["speedKmh"]) / 200.0,
         x,
@@ -37,8 +53,11 @@ def _features(state: dict) -> list[float]:
         forward_z,
         contact,
         float(state["nextCheckpointIndex"]) / max(1.0, checkpoints),
-        float(state["position"]["y"]) / 20.0,
+        float(position.get("y") or 0.0) / 20.0,
         1.0 if contact == 0.0 else 0.0,
+        local_right / 80.0,
+        local_forward / 80.0,
+        distance / 80.0,
     ]
 
 

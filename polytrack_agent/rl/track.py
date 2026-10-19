@@ -6,12 +6,73 @@ up/down/left/right and scores progress from the car state the worker returns.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 from pathlib import Path
 
 from polytrack_agent.rl.actions import mask_for
 from polytrack_agent.sim.client import SimClient
+
+# Part orientation table from the 0.5.2 worker (`Yh[axis][rotation]`), xyzw.
+_PART_QUAT = (
+    ((0.0, 0.0, 0.0, 1.0), (0.0, 0.7071067811865475, 0.0, 0.7071067811865476), (0.0, 1.0, 0.0, 0.0), (0.0, 0.7071067811865476, 0.0, -0.7071067811865475)),
+    ((0.0, 0.0, 1.0, 0.0), (0.7071067811865475, 0.0, 0.7071067811865476, 0.0), (1.0, 0.0, 0.0, 0.0), (0.7071067811865476, 0.0, -0.7071067811865475, 0.0)),
+    ((0.0, 0.0, -0.7071067811865477, 0.7071067811865475), (0.5, 0.5, -0.5, 0.5), (0.7071067811865475, 0.7071067811865477, 0.0, 0.0), (0.5, 0.5, 0.5, -0.5)),
+    ((0.0, 0.0, 0.7071067811865475, 0.7071067811865476), (0.5, -0.5, 0.5, 0.5), (0.7071067811865476, -0.7071067811865475, 0.0, 0.0), (0.5, -0.5, -0.5, -0.5)),
+    ((0.7071067811865475, 0.0, 0.0, 0.7071067811865476), (0.5, 0.5, 0.5, 0.5), (0.0, 0.7071067811865476, 0.7071067811865475, 0.0), (-0.5, 0.5, 0.5, -0.5)),
+    ((-0.7071067811865477, 0.0, 0.0, 0.7071067811865475), (-0.5, -0.5, 0.5, 0.5), (0.0, -0.7071067811865475, 0.7071067811865477, 0.0), (0.5, -0.5, 0.5, -0.5)),
+)
+_PART_SIZE = 5.0
+
+
+def _rotate(quat: tuple[float, float, float, float], vector: list[float]) -> tuple[float, float, float]:
+    x, y, z, w = quat
+    vx, vy, vz = (float(vector[0]), float(vector[1]), float(vector[2]))
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    )
+
+
+def _mean(points: list[tuple[float, float, float]]) -> tuple[float, float, float]:
+    count = float(len(points))
+    return (
+        sum(point[0] for point in points) / count,
+        sum(point[1] for point in points) / count,
+        sum(point[2] for point in points) / count,
+    )
+
+
+def _detectors(cfg: dict) -> dict[int, dict]:
+    game = cfg.get("game") or {}
+    parts = Path(game.get("parts") or Path(__file__).resolve().parents[1] / "sim" / "cache" / "track_parts.json")
+    catalog = json.loads(parts.read_text(encoding="utf-8"))
+    return {int(item["id"]): item.get("detector") for item in catalog}
+
+
+def gate_points(parts: list, detectors: dict[int, dict]) -> tuple[list[tuple[float, float, float]], tuple[float, float, float]]:
+    """World positions of each checkpoint, in order, and the finish line."""
+    buckets: dict[int, list[tuple[float, float, float]]] = {}
+    finishes: list[tuple[float, float, float]] = []
+    for raw in parts:
+        gx, gy, gz, kind, rotation, axis, order = (int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]), int(raw[4]), int(raw[5]), int(raw[6]))
+        quat = _PART_QUAT[axis][rotation]
+        detector = detectors.get(kind) or {}
+        center = detector.get("center") or [0.0, 0.0, 0.0]
+        ox, oy, oz = _rotate(quat, center)
+        point = (gx * _PART_SIZE + ox, gy * _PART_SIZE + oy, gz * _PART_SIZE + oz)
+        if order >= 0:
+            buckets.setdefault(order, []).append(point)
+        elif detector.get("type") == 1:
+            finishes.append(point)
+    gates = [_mean(buckets[order]) for order in sorted(buckets)]
+    finish = _mean(finishes) if finishes else (gates[-1] if gates else (0.0, 0.0, 0.0))
+    return gates, finish
 
 
 def game_root(cfg: dict) -> Path:
@@ -72,23 +133,43 @@ class SchoolagyTrack:
         self._state: dict = {}
         self._origin_y = 0.0
         self._progress = 0.0
-        self._meters = 0.0
         self._checkpoint = 0
+        self._span = 1.0
         self._slow = 0.0
+        self.gates, self.finish = gate_points(self.client.parts, _detectors(cfg))
+
+    def _point(self, index: int) -> tuple[float, float, float]:
+        if 0 <= index < len(self.gates):
+            return self.gates[index]
+        return self.finish
 
     def _view(self, state: dict) -> dict:
         viewed = dict(state)
         viewed["checkpointCount"] = self.client.checkpoint_count
+        point = self._point(int(viewed["nextCheckpointIndex"]))
+        viewed["target"] = {"x": point[0], "y": point[1], "z": point[2]}
         return viewed
 
+    def _distance(self, state: dict, index: int) -> float:
+        point = self._point(index)
+        position = state["position"]
+        return math.hypot(point[0] - float(position["x"]), point[2] - float(position["z"]))
+
     def _progress_of(self, state: dict, finished: bool) -> float:
+        """Checkpoint index plus how much of the way to that gate is done.
+
+        Closing the distance raises it. Driving away lowers it. Passing the
+        gate moves the index, which the step scores with its own bonus.
+        """
         if finished:
             return float(self.client.checkpoint_count) + 1.0
-        checkpoint = int(state["nextCheckpointIndex"])
-        if checkpoint != self._checkpoint:
-            self._checkpoint = checkpoint
-            self._meters = 0.0
-        return float(checkpoint) + min(0.99, self._meters / 150.0)
+        index = int(state["nextCheckpointIndex"])
+        distance = self._distance(state, index)
+        if index != self._checkpoint or self._span <= 0.0:
+            self._checkpoint = index
+            self._span = max(distance, 1.0)
+        covered = min(0.99, max(0.0, 1.0 - distance / self._span))
+        return float(index) + covered
 
     def reset(self, restart: bool = True) -> dict:
         del restart
@@ -96,8 +177,8 @@ class SchoolagyTrack:
         self._state = state
         self._origin_y = float(state["position"]["y"])
         self._progress = 0.0
-        self._meters = 0.0
         self._checkpoint = int(state["nextCheckpointIndex"])
+        self._span = max(self._distance(state, self._checkpoint), 1.0)
         self._slow = 0.0
         return {
             "state": state,
@@ -113,14 +194,12 @@ class SchoolagyTrack:
         target = int(before["frames"]) + self.repeat
         state = self._view(self.client.step(_controls(action_id, self.keys), target))
         dt = max(0.0, (int(state["frames"]) - int(before["frames"])) * 0.001)
-        moved = math.hypot(
-            float(state["position"]["x"]) - float(before["position"]["x"]),
-            float(state["position"]["z"]) - float(before["position"]["z"]),
-        )
-        self._meters += moved
         finished = state["finishFrames"] is not None
+        previous = self._checkpoint
         progress = self._progress_of(state, finished)
         reward = (progress - self._progress) * self.progress_scale - self.time_penalty
+        if int(state["nextCheckpointIndex"]) > previous:
+            reward += 1.0
         self._progress = progress
         if finished:
             reward += self.finish_bonus

@@ -34,13 +34,16 @@ function patchWorker(source) {
         if (null == loaded) throw new Error("Failed to load track");
         const bounds = track.getBounds();
         const seen = new Set();
+        const placed = [];
         track.forEachPart((x, y, z, type, rotation, axis, color, checkpointOrder) => {
           if (checkpointOrder != null) seen.add(checkpointOrder);
+          placed.push([x, y, z, type, rotation, axis, checkpointOrder == null ? -1 : checkpointOrder]);
         });
         postMessage({
           messageType: 11,
           bounds: { minX: bounds.min.x, minY: bounds.min.y, maxX: bounds.max.x, maxY: bounds.max.y },
           checkpointCount: seen.size,
+          parts: placed,
           save
         });
         break;
@@ -350,7 +353,12 @@ function boot(command) {
     mountain = mountains(boundsMessage.bounds, table);
     checkpointCount = boundsMessage.checkpointCount;
     trackText = boundsMessage.save;
-    write({ type: "ready", checkpointCount, bounds: boundsMessage.bounds });
+    write({
+      type: "ready",
+      checkpointCount,
+      bounds: boundsMessage.bounds,
+      parts: boundsMessage.parts,
+    });
   }, 10);
 }
 

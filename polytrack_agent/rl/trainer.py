@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 from pathlib import Path
 
@@ -134,9 +135,18 @@ def train_ppo(
     best_path = out_dir / "best.pt"
     if best_path.is_file():
         try:
-            best_progress = float(read_checkpoint(best_path, device).get("progress") or -1.0)
-        except (OSError, KeyError, ValueError):
+            saved = read_checkpoint(best_path, device)
+            same_actor = (
+                saved.get("arch") == ARCH
+                and int(saved.get("obs_dim") or -1) == model.obs_dim
+                and int(saved.get("n_actions") or -1) == model.n_actions
+            )
+            if same_actor:
+                best_progress = float(saved.get("progress") or -1.0)
+        except (OSError, KeyError, ValueError, TypeError):
             best_progress = -1.0
+    stop_progress = rl_cfg.get("stop_progress")
+    stop_at = None if stop_progress is None else float(stop_progress)
 
     numbers = LapNumbers(chords)
     rows: list[dict] = []
@@ -153,6 +163,23 @@ def train_ppo(
     episode_lengths: list[int] = []
     current_return = 0.0
     current_length = 0
+    episode_trace: list[dict] = []
+    passed_at: int | None = None
+
+    def save_pass(progress: float) -> None:
+        gates = [list(point) for point in getattr(env, "gates", ())]
+        finish = list(getattr(env, "finish", (0.0, 0.0, 0.0)))
+        payload = {
+            "track": track,
+            "progress": progress,
+            "gates": gates,
+            "finish": finish,
+            "parts": getattr(env.client, "parts", []),
+            "steps": episode_trace,
+        }
+        path = out_dir / "pass.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        log.info("Passed the gate. Wrote %s (%s steps).", path, len(episode_trace))
 
     def flush() -> None:
         nonlocal updates, best_progress, current_return, current_length
@@ -237,6 +264,26 @@ def train_ppo(
             stored_progress.append(float(info.get("progress") or 0.0))
             current_return += float(reward)
             current_length += 1
+            if stop_at is not None:
+                car = info["state"]
+                episode_trace.append(
+                    {
+                        "frames": int(car["frames"]),
+                        "progress": float(info.get("progress") or 0.0),
+                        "checkpoint": int(car["nextCheckpointIndex"]),
+                        "speed": float(car["speedKmh"]),
+                        "action": action_id,
+                        "position": {axis: float(car["position"][axis]) for axis in "xyz"},
+                        "quaternion": {axis: float(car["quaternion"][axis]) for axis in "xyzw"},
+                    }
+                )
+                if passed_at is None and float(info.get("progress") or 0.0) >= stop_at:
+                    passed_at = int(car["frames"])
+                    log.info("Cleared the gate at %.2fs, progress %.2f.", passed_at * 0.001, info.get("progress") or 0.0)
+                if passed_at is not None and (done or int(car["frames"]) >= passed_at + 2000):
+                    save_checkpoint(out_dir / "last.pt", model, {**meta, "update": updates, "progress": float(info.get("progress") or 0.0)})
+                    save_pass(float(info.get("progress") or 0.0))
+                    break
             if done:
                 episode_returns.append(current_return)
                 episode_lengths.append(current_length)
@@ -244,6 +291,8 @@ def train_ppo(
                 current_length = 0
                 if info.get("finished"):
                     log.info("Finish at progress %.2f.", info.get("progress") or 0.0)
+                episode_trace.clear()
+                passed_at = None
                 _begin(env, numbers)
                 if len(episode_returns) >= group_size:
                     flush()

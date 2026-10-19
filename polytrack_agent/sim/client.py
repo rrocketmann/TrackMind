@@ -25,6 +25,7 @@ class SimClient:
         self._send({"cmd": "boot", "root": str(root), "parts": str(parts), "track": str(track)})
         ready = self._expect("ready")
         self.checkpoint_count = int(ready["checkpointCount"])
+        self.parts = ready.get("parts") or []
         self.frames = 0
 
     def _read_errors(self, pipe) -> None:
