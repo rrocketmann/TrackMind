@@ -24,14 +24,16 @@ Checkpoints use arch `polytrack-ppo-0.6.3`. Older checkpoints do not load. `last
 
 ## Setup
 
-You need Python 3.10+, PyTorch, Node, and a Chromium or Chrome binary. `POLYTRACK_ROOT` is the polytrack fork directory. Copy that directory onto the training machine. The mesh dump has to be taken from that same build. The cache is not in git.
+You need Python 3.10+, PyTorch, Node, and a Chromium or Chrome binary.
+
+The polytrack fork (0.6.3) is included in this repo at `polytrack-0.6.3/`. It contains `simulation_worker.bundle.js`, tracks, models, and the car mesh. Point `POLYTRACK_ROOT` at it:
 
 ```bash
-export POLYTRACK_ROOT=/path/to/polytrack-0.6.3
+export POLYTRACK_ROOT=$PWD/polytrack-0.6.3
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-node scripts/dump_parts.mjs
+node scripts/dump_parts.mjs "$POLYTRACK_ROOT"
 python -m pytest
 ```
 

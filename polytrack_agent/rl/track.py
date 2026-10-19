@@ -84,11 +84,10 @@ def game_root(cfg: dict) -> Path:
         )
     root = Path(raw).expanduser().resolve()
     worker = root / "simulation_worker.bundle.js"
-    wasm = root / "polytrack_physics.wasm"
-    if not worker.is_file() or not wasm.is_file():
+    if not worker.is_file():
         raise FileNotFoundError(
             f"{root} is not the PolyTrack 0.6.3 web directory. "
-            "It needs simulation_worker.bundle.js and polytrack_physics.wasm."
+            "It needs simulation_worker.bundle.js."
         )
     return root
 
