@@ -16,9 +16,6 @@ const VIDEO_W = 640;
 const VIDEO_H = 480;
 const VIDEO_FPS = 30;
 
-let recording = false;
-let videoFrames = [];
-
 function write(message) {
   fs.writeSync(1, `${JSON.stringify(message)}\n`);
 }
@@ -340,10 +337,7 @@ function postMessage(message) {
     if (waiting && state.frames >= waiting) {
       waiting = null;
       const out = { type: "state", state, checkpointCount };
-      if (recording) {
-        out.frame = renderFrame(state);
-        videoFrames.push(out.frame);
-      }
+      out.frame = renderFrame(state);
       write(out);
     }
   }
@@ -526,17 +520,6 @@ commands.on("line", (line) => {
     if (command.cmd === "boot") boot(command);
     else if (command.cmd === "reset") commandReset();
     else if (command.cmd === "step") commandStep(command);
-    else if (command.cmd === "record") {
-      recording = command.enable !== false;
-      if (recording) videoFrames = [];
-      write({ type: "ack", cmd: "record", recording });
-    }
-    else if (command.cmd === "flush-video") {
-      const frames = videoFrames;
-      videoFrames = [];
-      recording = false;
-      write({ type: "video-frames", count: frames.length, frames });
-    }
     else if (command.cmd === "close") process.exit(0);
     else fail(`unknown command ${command.cmd}`);
   } catch (error) {
