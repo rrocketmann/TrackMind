@@ -20,7 +20,7 @@ import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 
 const URL = process.env.POLYTRACK_URL || "https://www.kodub.com/apps/polytrack";
-const OUT = process.argv[2] || path.resolve("runs/real_polytrack.mp4");
+const OUT = process.argv[2] || path.resolve("runs/real_polytrack.bmp");
 const DISPLAY = ":99";
 const WIDTH = 1280;
 const HEIGHT = 720;
@@ -134,10 +134,11 @@ process.on("SIGTERM", cleanup);
     "-framerate", String(FPS),
     "-video_size", `${WIDTH}x${HEIGHT}`,
     "-i", DISPLAY + ".0",
-    "-c:v", "libopenh264",
-    "-preset", "veryfast",
-    "-crf", "23",
-    "-movflags", "frag_keyframe+empty_moov",
+    "-frames:v", "1",
+    "-c:v", "rawvideo",
+    "-pix_fmt", "bgr24",
+    "-s", `${WIDTH}x${HEIGHT}`,
+    "-movflags", "",
     "-y",
     OUT,
   ], {
