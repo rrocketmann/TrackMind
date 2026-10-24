@@ -12,10 +12,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const MASS_OFFSET = 0.6;
 const PART_SIZE = 5;
 
-const VIDEO_W = 640;
-const VIDEO_H = 480;
-const VIDEO_FPS = 30;
-
 function write(message) {
   fs.writeSync(1, `${JSON.stringify(message)}\n`);
 }
@@ -25,127 +21,36 @@ function fail(error) {
   process.exit(1);
 }
 
-function quaternionYaw(q) {
-  // Extract yaw (Z rotation) from a quaternion {x, y, z, w}
-  const siny_cosp = 2 * (q.w * q.z + q.x * q.y);
-  const cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
-  return Math.atan2(siny_cosp, cosy_cosp);
-}
-
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-// Render a top-down PPM frame of the current simulation state.
-// PPM is a trivial raw RGB format that ffmpeg can encode directly.
-function renderFrame(state) {
-  const w = VIDEO_W;
-  const h = VIDEO_H;
-  const px = new Uint8ClampedArray(w * h * 4);
-  const idx = (x, y) => (y * w + x) * 4;
-
-  // Background
-  for (let i = 0; i < px.length; i += 4) {
-    px[i] = 42;     px[i + 1] = 42;     px[i + 2] = 42;     px[i + 3] = 255;
-  }
-
-  const cx = w / 2;
-  const cy = h / 2;
-  const scale = 12; // pixels per unit
-
-  // Draw track parts from bounds/parts if available
-  // Parts are [x, y, z, type, rotation, axis, checkpointOrder]
-  if (window.__trackParts) {
-    for (const part of window.__trackParts) {
-      const px_ = cx + part[0] * scale;
-      const py_ = cy - part[1] * scale;
-      const size = 6;
-      const type = part[3] || 0;
-      let r = 80, g = 80, b = 80;
-      if (type === 1) { r = 100; g = 100; b = 100; }      // road
-      if (type === 2) { r = 40; g = 120; b = 40; }        // grass
-      if (type === 3) { r = 200; g = 200; b = 50; }       // checkpoint
-      if (part[6] != null && part[6] >= 0) { r = 255; g = 215; b = 0; } // checkpoint marker
-      const half = size / 2;
-      for (let dy = -half; dy <= half; dy++) {
-        for (let dx = -half; dx <= half; dx++) {
-          const ix = Math.round(px_ + dx);
-          const iy = Math.round(py_ + dy);
-          if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
-            const i = idx(ix, iy);
-            px[i] = r; px[i + 1] = g; px[i + 2] = b;
-          }
-        }
-      }
-    }
-  }
-
-  // Draw car
-  const carX = cx + state.position.x * scale;
-  const carY = cy - state.position.z * scale;
-  const yaw = quaternionYaw(state.quaternion);
-  const carLen = 14;
-  const carWid = 8;
-  const corners = [
-    { x: carLen / 2, y: carWid / 2 },
-    { x: carLen / 2, y: -carWid / 2 },
-    { x: -carLen / 2, y: -carWid / 2 },
-    { x: -carLen / 2, y: carWid / 2 },
-  ];
-  // Filled polygon via scanline-ish approach: draw thick line segments
-  for (let t = 0; t < 1; t += 0.02) {
-    const ax = corners[0].x * (1 - t) + corners[1].x * t;
-    const ay = corners[0].y * (1 - t) + corners[1].y * t;
-    const bx = corners[2].x * (1 - t) + corners[3].x * t;
-    const by = corners[2].y * (1 - t) + corners[3].y * t;
-    for (let s = 0; s <= 1; s += 0.1) {
-      const fx = ax * (1 - s) + bx * s;
-      const fy = ay * (1 - s) + by * s;
-      const rx = carX + fx * Math.cos(yaw) - fy * Math.sin(yaw);
-      const ry = carY + fx * Math.sin(yaw) + fy * Math.cos(yaw);
-      const ix = Math.round(rx);
-      const iy = Math.round(ry);
-      if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
-        const i = idx(ix, iy);
-        px[i] = 50; px[i + 1] = 150; px[i + 2] = 255;
-      }
-    }
-  }
-  // Car heading indicator
-  const hx = carX + 16 * Math.cos(yaw);
-  const hy = carY + 16 * Math.sin(yaw);
-  for (let d = 0; d <= 16; d += 2) {
-    const ix = Math.round(carX + d * Math.cos(yaw));
-    const iy = Math.round(carY + d * Math.sin(yaw));
-    if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
-      const i = idx(ix, iy);
-      px[i] = 255; px[i + 1] = 50; px[i + 2] = 50;
-    }
-  }
-
-  // UI text overlay: speed and frames (simple pixel text is too complex, skip)
-
-  // Encode PPM
-  const header = Buffer.from(`P6\n${w} ${h}\n255\n`, "ascii");
-  const rgb = Buffer.alloc(w * h * 3);
-  let ri = 0;
-  for (let i = 0; i < px.length; i += 4) {
-    rgb[ri++] = px[i];
-    rgb[ri++] = px[i + 1];
-    rgb[ri++] = px[i + 2];
-  }
-  return Buffer.concat([header, rgb]).toString("base64");
-}
-
-function ppmToVideoFrame(b64ppm) {
-  return b64ppm; // ffmpeg will handle rawvideo input
-}
-
 function patchWorker(source) {
   const replacements = [
     [
-                    "case X_.CreateCar:\n                        !function(e) {\n                            const i = sw.fromSaveString(e.data.trackData);",
-                    `case X_.CreateCar: {\n                        const exported = sw.fromSaveString(r.trackData);\n                        const track = exported;\n                        if (null == track) throw new Error("Failed to load track");\n                        const bounds = track.getBounds();\n                        const seen = new Set();\n                        const placed = [];\n                        track.forEachPart((x, y, z, type, rotation, axis, color, checkpointOrder) => {\n                          if (checkpointOrder != null) seen.add(checkpointOrder);\n                          placed.push([x, y, z, type, rotation, axis, checkpointOrder == null ? -1 : checkpointOrder]);\n                        });\n                        postMessage({\n                          messageType: 11,\n                          bounds: { minX: bounds.min.x, minY: bounds.min.y, maxX: bounds.max.x, maxY: bounds.max.y },\n                          checkpointCount: seen.size,\n                          parts: placed,\n                          save: r.trackData\n                        });\n                        !function(e) {\n                            const i = sw.fromSaveString(e.data.trackData);`,
+      "case X_.CreateCar:\n                        !function(e) {\n                            const i = sw.fromSaveString(e.data.trackData);",
+      `case X_.CreateCar: {
+                        let trackText = e.data.trackData;
+                        let track = sw.fromSaveString(trackText);
+                        if (null == track) {
+                          const fromExport = sw.fromExportString(trackText);
+                          if (null == fromExport) throw new Error("Failed to load track");
+                          track = fromExport.trackData;
+                          trackText = track.toSaveString();
+                        }
+                        const bounds = track.getBounds();
+                        const seen = new Set();
+                        const placed = [];
+                        track.forEachPart((x, y, z, type, rotation, axis, color, checkpointOrder) => {
+                          if (checkpointOrder != null) seen.add(checkpointOrder);
+                          placed.push([x, y, z, type, rotation, axis, checkpointOrder == null ? -1 : checkpointOrder]);
+                        });
+                        postMessage({
+                          messageType: 11,
+                          bounds: { minX: bounds.min.x, minY: bounds.min.y, maxX: bounds.max.x, maxY: bounds.max.y },
+                          checkpointCount: seen.size,
+                          parts: placed,
+                          save: trackText
+                        });
+                        if (e.data.carId == null) break;
+                        !function(e) {
+                            const i = sw.fromSaveString(e.data.trackData);`,
     ],
     [
       "                        }(e);\n                        break;\n                    case X_.DeleteCar:",
@@ -154,6 +59,69 @@ function patchWorker(source) {
     [
       "setInterval(c)",
       "void 0;globalThis.__step=c;",
+    ],
+    [
+      "            getPosition() {\n                return S_(this, a_, \"f\")\n            }",
+      `            getVelocity() {
+                const v = S_(this, JA, "f").getLinearVelocity();
+                return { x: v.x(), y: v.y(), z: v.z() };
+            }
+            getPosition() {
+                return S_(this, a_, "f")
+            }`,
+    ],
+    [
+      "                        speedKmh: r.getSpeedKmh(),\n                        hasStarted: r.hasStarted(),",
+      `                        speedKmh: r.getSpeedKmh(),
+                        // getSpeedKmh() is derived from wheel rotation, so it
+                        // reads like real speed even while the wheels spin
+                        // freely in the air. The chassis velocity is the honest
+                        // one; the slip angle the steering assist keys on needs
+                        // it. wheelSkidInfo is how much each tyre is sliding.
+                        velocity: (() => {
+                          const v = r.getVelocity && r.getVelocity();
+                          return v ? { x: v.x, y: v.y, z: v.z } : null;
+                        })(),
+                        hasStarted: r.hasStarted(),`,
+    ],
+    [
+      "                function c() {\n                    const e = performance.now()\n                      , t = [];\n                    if (n.length > 0) {",
+      `                function c() {
+                    // The offscreen worker only flushes control samples in its
+                    // realtime loop. This loop does not, so copy the latest
+                    // sample that is already due onto the live controls. Leave
+                    // a future sample queued. Applying it early holds the first
+                    // button of the race and ignores every later command.
+                    if (n.length > 0) {
+                      for (const e of n) if (null != e.userControls && e.userControls.length > 0) {
+                        const frame = e.model.getTime().numberOfFrames;
+                        let latest = null;
+                        let cursor = 0;
+                        for (const sample of e.userControls) {
+                            if (sample.frame > frame) break;
+                            latest = sample;
+                            cursor += 1;
+                        }
+                        if (latest != null) {
+                          e.userControls.splice(0, cursor);
+                          const on = e.model.controls;
+                          on.up = latest.up, on.right = latest.right, on.down = latest.down,
+                          on.left = latest.left, on.reset = latest.reset;
+                        }
+                      }
+                    }
+                    const e = performance.now()
+                      , t = [];
+                    if (n.length > 0) {`,
+    ],
+    [
+      "                                    const n = Math.max(0, t - s);\n                                    let i = r.model.getTime().numberOfFrames + n;\n                                    if (r.model.hasStarted() || (i = 0),\n                                    0 == r.userControls.length)",
+      `                                    // Stamp the sample on this simulation frame. The stock
+                                    // line adds the milliseconds since boot, so once the worker
+                                    // has been alive a steer is scheduled thousands of frames
+                                    // later and the same plan drives a different line.
+                                    let i = r.model.hasStarted() ? r.model.getTime().numberOfFrames : 0;
+                                    if (0 == r.userControls.length)`,
     ],
     [
       "onmessage = i;",
@@ -293,11 +261,29 @@ function decodeCarState(buffer) {
   return {
     frames,
     speedKmh,
+    velocity: null,
     finishFrames,
     nextCheckpointIndex,
     position,
     quaternion,
     wheels: [!!(flags & 8), !!(flags & 16), !!(flags & 32), !!(flags & 64)],
+  };
+}
+
+function carStateFromObject(raw) {
+  const contact = raw.wheelContact || [];
+  const position = raw.position || {};
+  const quaternion = raw.quaternion || {};
+  const velocity = raw.velocity || null;
+  return {
+    frames: raw.frames,
+    speedKmh: raw.speedKmh,
+    velocity: velocity ? { x: velocity.x, y: velocity.y, z: velocity.z } : null,
+    finishFrames: raw.finishFrames === undefined ? null : raw.finishFrames,
+    nextCheckpointIndex: raw.nextCheckpointIndex,
+    position: { x: position.x, y: position.y, z: position.z },
+    quaternion: { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w },
+    wheels: [0, 1, 2, 3].map((index) => !!contact[index]),
   };
 }
 
@@ -332,12 +318,20 @@ function postMessage(message) {
     boundsMessage = message;
     return;
   }
-  if (message.messageType === 10 && message.carStateBuffers && message.carStateBuffers.length > 0) {
-    const state = decodeCarState(message.carStateBuffers[message.carStateBuffers.length - 1]);
+  if (message.messageType === 10) {
+    // The 0.6.3 worker posts `carStates` objects. Older workers posted packed
+    // `carStateBuffers`, which decodeCarState reads.
+    const states = message.carStates;
+    const buffers = message.carStateBuffers;
+    const state = Array.isArray(states) && states.length
+      ? carStateFromObject(states[states.length - 1])
+      : Array.isArray(buffers) && buffers.length
+        ? decodeCarState(buffers[buffers.length - 1])
+        : null;
+    if (!state) return;
     if (waiting && state.frames >= waiting) {
       waiting = null;
       const out = { type: "state", state, checkpointCount };
-      out.frame = renderFrame(state);
       write(out);
     }
   }
@@ -451,7 +445,6 @@ function boot(command) {
     mountain = mountains(boundsMessage.bounds, table);
     checkpointCount = boundsMessage.checkpointCount;
     trackText = boundsMessage.save;
-    window.__trackParts = boundsMessage.parts || [];
     write({
       type: "ready",
       checkpointCount,

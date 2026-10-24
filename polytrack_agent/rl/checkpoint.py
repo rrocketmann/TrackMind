@@ -13,6 +13,7 @@ from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.state import obs_dim
 
 ARCH = "polytrack-ppo-0.6.3"
+SAC_ARCH = "polytrack-sac-0.6.3"
 
 
 def read_checkpoint(path: Path, device: torch.device) -> dict[str, Any]:
@@ -22,10 +23,15 @@ def read_checkpoint(path: Path, device: torch.device) -> dict[str, Any]:
         return torch.load(path, map_location=device)
 
 
-def save_checkpoint(path: Path, model: StateActorCritic, meta: dict[str, Any]) -> None:
+def save_checkpoint(
+    path: Path,
+    model: StateActorCritic,
+    meta: dict[str, Any],
+    arch: str = ARCH,
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"state_dict": model.state_dict(), "arch": ARCH, **meta}
+    payload = {"state_dict": model.state_dict(), "arch": arch, **meta}
     torch.save(payload, path)
 
 
@@ -46,8 +52,8 @@ def bind_runtime(cfg: dict, payload: dict[str, Any]) -> dict:
 
 def load_actor(payload: dict[str, Any], device: torch.device) -> StateActorCritic:
     arch = payload.get("arch")
-    if arch not in (ARCH, "schoolagy-ppo-v1"):
-        raise ValueError(f"expected {ARCH} or schoolagy-ppo-v1, got {arch}")
+    if arch not in (ARCH, SAC_ARCH, "schoolagy-ppo-v1"):
+        raise ValueError(f"expected {ARCH}, {SAC_ARCH}, or schoolagy-ppo-v1, got {arch}")
     model = StateActorCritic(
         obs_dim=int(payload["obs_dim"]),
         n_actions=int(payload["n_actions"]),

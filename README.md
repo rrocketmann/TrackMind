@@ -1,6 +1,6 @@
 # PolyTrack agent
 
-PPO on the PolyTrack 0.6.3 car in the polytrack fork at `polytrack-0.6.3`. The game's own `polytrack_physics.wasm` is the environment. The policy reads the car state and picks one key hold. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
+Discrete SAC on the PolyTrack 0.6.3 car in the polytrack fork at `polytrack-0.6.3`. The game's own `polytrack_physics.wasm` is the environment. The policy reads the car state and picks one key hold. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
 
 `POLYTRACK_ROOT` points at that 0.6.3 directory. It contains `simulation_worker.bundle.js` and `polytrack_physics.wasm`. This program does not open any external page, read its memory, or submit a leaderboard time.
 
@@ -10,17 +10,19 @@ PPO on the PolyTrack 0.6.3 car in the polytrack fork at `polytrack-0.6.3`. The g
 
 Each decision holds W, A, S, and D for 50 physics frames (50 ms). The worker ticks at 1 ms. Those four keys are the whole control set. Air pitch and roll reuse them while the car is off the ground. The nine actions are the exclusive combinations: throttle or brake or neither, and left or right or straight. Restart is not an action. An episode reset deletes the car and creates it at the start. The in-game respawn key would put the car back on the last checkpoint, so the trainer does not send it.
 
-The observation is fifteen numbers plus a one-hot of the previous action:
+The observation is nineteen numbers plus a one-hot of the previous action:
 
-- speed, quaternion, upright, and the body's forward direction on the ground plane
-- fraction of wheels in contact, and whether the car is airborne
-- next checkpoint divided by the checkpoint count
-- height
+- position, velocity, and acceleration
+- heading on the ground plane, uprightness, and how many wheels are down
+- meters of road left to the side, and which side the edge is on
 - where the next gate sits in the car frame: right, forward, and distance
+- the next checkpoint divided by the checkpoint count
+
+`speedKmh` is not in the observation. It comes from wheel rotation, so a car spinning its wheels against a wall or in mid-air still reads as moving. The velocity vector is the motion the policy sees, and it also drives the stall timer.
 
 Reward is the change in progress, minus a small time penalty, plus a bonus on the finish. Progress is the checkpoint index plus how far the car has driven since that checkpoint, capped just short of the next index. A finish scores one past the last checkpoint. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, or the time limit.
 
-Checkpoints use arch `polytrack-ppo-0.6.3`. Older checkpoints do not load. `last.pt` resumes only when the track name matches. `best.pt` is the highest mean progress in an update.
+SAC checkpoints use arch `polytrack-sac-0.6.3`. PPO checkpoints use `polytrack-ppo-0.6.3`. A checkpoint loads only when the arch, the track name, and the observation width match. `best.pt` is the highest mean progress in an update.
 
 ## Setup
 
@@ -50,15 +52,19 @@ python scripts/train.py
 python scripts/play.py --episodes 5
 ```
 
-`scripts/train.py` runs until you stop it. It writes `runs/summer1/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/summer1/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode.
+`scripts/train.py` runs SAC until you stop it. It writes `runs/sac/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/sac/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode. The older PPO run stays in `runs/summer1`.
 
-To record the AI driving, add `--record-video`:
+Training has not yet completed a lap. The env and the host are correct; the policy collapses onto the wrong action instead of holding throttle, which a constant action proves is worth far more. The measurements, what has been ruled out, and the plan are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md), under "the learner does not find the good action".
+
+Every finish logs the lap time and the best lap of the run. To train until a lap drops under a target time instead of running forever, pass `--stop-time`:
 
 ```bash
-python scripts/play.py --episodes 5 --record-video runs/summer1/ai_pass.mp4
+python scripts/train.py --stop-time 25
 ```
 
-This writes an MP4 of the greedy AI laps. On a machine with no display, it uses Xvfb + ffmpeg to capture frames headlessly.
+Training saves `last.pt` and exits on the first lap at or below 25 s. The same field is `rl.stop_time` in a config overlay.
+
+`scripts/play.py --episodes 5` loads `runs/sac/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
 
 ## First checkpoint
 
@@ -78,30 +84,13 @@ From another computer, without cloning:
 ffplay -autoexit https://github.com/rrocketmann/TrackMind/raw/refs/heads/main/runs/summer1/gate.mp4
 ```
 
-To record the real PolyTrack page yourself (a different build from this fork), use `scripts/record.mjs`. It launches Chromium on a virtual X display (Xvfb) and grabs that display with ffmpeg, so it works from an SSH session with no physical monitor. The car drives forward by holding W; steer manually if needed.
-
-```bash
-CHROME=/usr/bin/google-chrome node scripts/record.mjs runs/real_polytrack.mp4
-```
-
-Press Ctrl+C to stop. The script writes `runs/real_polytrack.mp4` (or the path you pass). Play it where you have a screen:
-
-```bash
-ffplay -autoexit runs/real_polytrack.mp4
-```
-
-A sample real-PolyTrack recording is already committed at `runs/real_polytrack.mp4` (15 s). The polytrack fork gate pass remains at `runs/summer1/gate.mp4`:
+A sample real-PolyTrack recording is committed at `runs/real_polytrack.mp4` (15 s). The polytrack fork gate pass remains at `runs/summer1/gate.mp4`:
 
 ```bash
 ffplay -autoexit runs/summer1/gate.mp4
 ```
 
-The recorder needs `ffmpeg`, `xvfb-run`/`Xvfb`, and a Chromium or Chrome binary. It does not open or read the local polytrack fork simulation — it records the official page directly. The program still does not submit a leaderboard time.
-
-If PolyTrack shows "encountered an unexpected error":
-- Make sure Chrome is **not** launched with `--disable-gpu` — PolyTrack needs WebGL. The recorder uses `--ignore-gpu-blocklist --disable-gpu-sandbox` for WebGL.
-- Run from a machine with a real display and GPU if possible; Xvfb software rendering can be unstable.
-- Check the console output — the recorder prints PolyTrack's page errors under `[page console error]` / `[page exception]`.
+The recorder script (`scripts/record.mjs`) that captured the real PolyTrack page was removed; the committed MP4s remain as samples. The program does not open external pages, read their memory, or submit a leaderboard time.
 
 `runs/summer1/last.pt` is the actor saved with that lap. It is `polytrack-ppo-v1`, 24 inputs, progress 1.03, and it had not taken a PPO step yet. `runs/summer1/best.pt` is an earlier 21-input actor from update 18. The current observation does not load it.
 
@@ -115,9 +104,15 @@ If PolyTrack shows "encountered an unexpected error":
 | `keys` | subset of `w a s d` |
 | `rl.action_repeat` | physics frames per decision |
 | `rl.timeout_s` / `rl.stuck_s` | episode limits |
+| `rl.airborne_grace_s` | how long the car may have no wheel on the track before it counts as beached |
+| `rl.reset_action` / `rl.auto_respawn` | opt-in 10th reset action, and respawning at a checkpoint on beaching or a stall |
+| `rl.stop_time` | stop training once a lap finishes at or below this many seconds |
 | `rl.group_size` | laps collected before one PPO update |
 | `rl.out_dir` | checkpoint directory |
 | `reward.progress_scale` / `time_penalty` / `finish_bonus` | reward terms |
+| `reward.contact_reward` / `respawn_penalty` / `beach_penalty` | per-step pay for wheels on the road, cost per respawn, one-off cost for leaving the road |
+| `reward.stall_penalty` | per-step cost for sitting on the road without covering ground |
+| `reward.speed_reward` / `speed_cap_kmh` | per-step pay for ground speed while the wheels are down, and the speed where it stops growing |
 
 The default track is `tracks/official/summer1.track`. Any other official or community `.track` in that checkout works after the same parts dump. The dump is the page's track-piece catalog, shared across tracks. It also stores the car collision hull and the mass offset from that same Init message. The 0.6.3 hull in `models/car.glb` is Draco-compressed, so the host cannot read it from the file. Mountains still come from the game's random table in `main.bundle.js`.
 
@@ -127,7 +122,6 @@ The default track is `tracks/official/summer1.track`. Any other official or comm
 polytrack_agent/sim/     Node host, Python client, generated mesh cache
 polytrack_agent/rl/      observation, track env, PPO
 scripts/dump_parts.mjs   one-time mesh dump
-scripts/record.mjs       record the real PolyTrack page (Xvfb + ffmpeg)
 scripts/train.py
 scripts/play.py
 ```

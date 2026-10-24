@@ -12,12 +12,13 @@ import torch
 
 from polytrack_agent.rl.device import resolve_device
 from polytrack_agent.rl.track import SchoolagyTrack, make_track
-from polytrack_agent.rl.actions import n_actions
+from polytrack_agent.rl.actions import chord_name, n_actions
 from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint, save_checkpoint
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.ppo import ppo_update
+from polytrack_agent.rl.seed import set_seed
 from polytrack_agent.rl.state import LapNumbers, obs_dim
 
 log = logging.getLogger(__name__)
@@ -95,6 +96,69 @@ def _begin(env: SchoolagyTrack, numbers: LapNumbers) -> None:
     numbers.advance(env.reset(restart=True), -1)
 
 
+def _spawn_policy(model: StateActorCritic, env: SchoolagyTrack, device: torch.device) -> tuple[str, dict[str, float]]:
+    """Softmax over chords at the spawn, after a fresh restart. No unimix."""
+    numbers = LapNumbers(model.n_actions)
+    numbers.reset()
+    numbers.advance(env.reset(restart=True), -1)
+    observation = torch.from_numpy(numbers.vector()).unsqueeze(0).to(device)
+    reset_action = bool(getattr(env, "reset_action", False))
+    with torch.no_grad():
+        logits, _value = model(observation)
+        probabilities = torch.softmax(logits, dim=-1)[0].detach().cpu()
+    named = {
+        chord_name(index, env.keys, reset_action): float(probabilities[index])
+        for index in range(model.n_actions)
+    }
+    top = max(named, key=named.get)
+    return top, named
+
+
+def _mean_std(values: np.ndarray) -> tuple[float, float]:
+    if int(values.shape[0]) == 1:
+        return float(values[0]), 0.0
+    return float(values.mean()), float(values.std(ddof=1))
+
+
+def summarize_trials(reports: list[dict]) -> dict:
+    """Mean and sample standard deviation of progress across independent runs."""
+    if not reports:
+        raise ValueError("need at least one trial")
+    best = np.asarray([float(report["best_progress"]) for report in reports], dtype=np.float64)
+    last_values = []
+    trials = []
+    for report in reports:
+        rows = list(report.get("rows") or [])
+        if not rows:
+            raise ValueError(f"seed {report.get('seed')} finished with no updates")
+        last_progress = float(rows[-1]["progress"])
+        last_values.append(last_progress)
+        trials.append(
+            {
+                "seed": report.get("seed"),
+                "updates": int(report.get("updates") or 0),
+                "best_progress": float(report["best_progress"]),
+                "last_progress": last_progress,
+                "last_entropy": float(rows[-1]["entropy"]) if rows[-1].get("entropy") is not None else 0.0,
+                "spawn_chord": report.get("spawn_chord"),
+                "spawn_probs": report.get("spawn_probs") or {},
+                "out_dir": report.get("out_dir"),
+            }
+        )
+    last = np.asarray(last_values, dtype=np.float64)
+    best_mean, best_std = _mean_std(best)
+    last_mean, last_std = _mean_std(last)
+    return {
+        "n": len(reports),
+        "seeds": [report.get("seed") for report in reports],
+        "best_progress_mean": best_mean,
+        "best_progress_std": best_std,
+        "last_progress_mean": last_mean,
+        "last_progress_std": last_std,
+        "trials": trials,
+    }
+
+
 def train_ppo(
     cfg: dict,
     env: SchoolagyTrack | None = None,
@@ -107,21 +171,28 @@ def train_ppo(
     only when its track matches.
     """
     rl_cfg = cfg["rl"]
+    seed = rl_cfg.get("seed")
+    if seed is not None:
+        set_seed(int(seed))
     device = resolve_device(str(rl_cfg.get("device") or "auto"))
     hardware = configure_torch(device)
+    if seed is not None and device.type == "cuda":
+        # benchmark picks kernels from shapes, which changes the result across runs.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     track = Path(cfg["game"]["track"]).stem
-    log.info("PPO device %s (%s) track %s", device, hardware, track)
+    log.info("PPO device %s (%s) track %s seed %s", device, hardware, track, "unset" if seed is None else int(seed))
     own_env = env is None
     if env is None:
         env = make_track(cfg)
-    chords = n_actions(env.keys)
+    chords = n_actions(env.keys, reset_action=getattr(env, "reset_action", False))
     hidden = int(rl_cfg.get("hidden") or 128)
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
     out_dir = Path(rl_cfg.get("out_dir") or "runs/ppo")
     out_dir.mkdir(parents=True, exist_ok=True)
     resumed = bool(rl_cfg.get("resume", True)) and _resume(out_dir / "last.pt", model, device, track)
     if not resumed:
-        model.bias_toward_forward(env.keys)
+        model.bias_toward_forward(env.keys, reset_action=getattr(env, "reset_action", False))
     model.eval()
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(rl_cfg.get("lr") or 3e-4))
     group_size = max(2, int(rl_cfg.get("group_size") or 8))
@@ -147,6 +218,10 @@ def train_ppo(
             best_progress = -1.0
     stop_progress = rl_cfg.get("stop_progress")
     stop_at = None if stop_progress is None else float(stop_progress)
+    stop_time = rl_cfg.get("stop_time")
+    stop_time_s = None if stop_time is None else float(stop_time)
+    if stop_time_s is not None:
+        log.info("Stopping once a lap finishes at or below %.2fs.", stop_time_s)
 
     numbers = LapNumbers(chords)
     rows: list[dict] = []
@@ -165,6 +240,9 @@ def train_ppo(
     current_length = 0
     episode_trace: list[dict] = []
     passed_at: int | None = None
+    best_lap: float | None = None
+    spawn_chord: str | None = None
+    spawn_probs: dict[str, float] = {}
 
     def save_pass(progress: float) -> None:
         gates = [list(point) for point in getattr(env, "gates", ())]
@@ -290,7 +368,23 @@ def train_ppo(
                 current_return = 0.0
                 current_length = 0
                 if info.get("finished"):
-                    log.info("Finish at progress %.2f.", info.get("progress") or 0.0)
+                    lap_s = int(info["state"]["finishFrames"]) * 0.001
+                    if best_lap is None or lap_s < best_lap:
+                        best_lap = lap_s
+                    log.info(
+                        "Finish at %.2fs (progress %.2f), best %.2fs.",
+                        lap_s,
+                        info.get("progress") or 0.0,
+                        best_lap,
+                    )
+                    if stop_time_s is not None and lap_s <= stop_time_s:
+                        log.info("Lap is at or under the %.2fs target. Stopping.", stop_time_s)
+                        save_checkpoint(
+                            out_dir / "last.pt",
+                            model,
+                            {**meta, "update": updates, "progress": float(info.get("progress") or 0.0)},
+                        )
+                        break
                 episode_trace.clear()
                 passed_at = None
                 _begin(env, numbers)
@@ -299,6 +393,25 @@ def train_ppo(
     except KeyboardInterrupt:
         log.info("Stopped.")
     finally:
+        try:
+            spawn_chord, spawn_probs = _spawn_policy(model, env, device)
+            throttle_name = "w" if "w" in spawn_probs else "up"
+            log.info(
+                "spawn policy top %s (%.2f), straight throttle %.2f",
+                spawn_chord,
+                spawn_probs.get(spawn_chord, 0.0),
+                spawn_probs.get(throttle_name, 0.0),
+            )
+        except Exception:
+            log.warning("Could not read the policy at the spawn.", exc_info=True)
         if own_env:
             env.close()
-    return {"updates": updates, "best_progress": best_progress, "rows": rows, "out_dir": str(out_dir)}
+    return {
+        "updates": updates,
+        "best_progress": best_progress,
+        "rows": rows,
+        "out_dir": str(out_dir),
+        "seed": None if seed is None else int(seed),
+        "spawn_chord": spawn_chord,
+        "spawn_probs": spawn_probs,
+    }

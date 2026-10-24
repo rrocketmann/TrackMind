@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from polytrack_agent.rl.actions import forward_ids
+from polytrack_agent.rl.actions import throttle_only_ids
 
 
 def mix_logits(logits: torch.Tensor, unimix: float) -> torch.Tensor:
@@ -37,9 +37,14 @@ class StateActorCritic(nn.Module):
         self.policy = nn.Linear(self.hidden, self.n_actions)
         self.value = nn.Linear(self.hidden, 1)
 
-    def bias_toward_forward(self, keys: list[str]) -> None:
-        """Start more likely to hold throttle, so the first laps actually move."""
-        ids = forward_ids(keys)
+    def bias_toward_forward(self, keys: list[str], reset_action: bool = False) -> None:
+        """Start more likely to hold straight throttle, so the first laps move.
+
+        `wa` and `wd` are left at zero. They accelerate off the grid sooner than
+        straight throttle, and a shared boost lets them win before the straight
+        line's reward shows up.
+        """
+        ids = throttle_only_ids(keys, reset_action=reset_action)
         if not ids:
             return
         with torch.no_grad():
