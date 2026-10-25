@@ -99,7 +99,7 @@ def cmd_train(cfg: dict, args) -> int:
         cfg["rl"]["seed"] = int(args.seed)
     if getattr(args, "algo", None) is not None:
         cfg["rl"]["algo"] = args.algo
-    train = _trainer(str(cfg["rl"].get("algo") or "sac"))
+    train = _trainer(str(cfg["rl"].get("algo") or "ppo"))
     trials = int(args.trials)
     if trials < 1:
         raise ValueError(f"trials must be >= 1, got {trials}")

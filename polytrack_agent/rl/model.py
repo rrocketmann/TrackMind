@@ -19,7 +19,12 @@ def mix_logits(logits: torch.Tensor, unimix: float) -> torch.Tensor:
 
 
 class StateActorCritic(nn.Module):
-    """MLP over a numeric lap vector. Categorical chord, scalar value."""
+    """Actor over the nine chords, plus a critic for the environment reward.
+
+    The critic has its own weights. It predicts the discounted return of the
+    progress reward. That target contains no entropy bonus, so the score stays
+    on the road when the policy gets very random or locks onto one button.
+    """
 
     def __init__(self, obs_dim: int, n_actions: int, hidden: int = 128):
         super().__init__()
@@ -35,6 +40,12 @@ class StateActorCritic(nn.Module):
             nn.GELU(),
         )
         self.policy = nn.Linear(self.hidden, self.n_actions)
+        self.critic = nn.Sequential(
+            nn.Linear(self.obs_dim, self.hidden),
+            nn.GELU(),
+            nn.Linear(self.hidden, self.hidden),
+            nn.GELU(),
+        )
         self.value = nn.Linear(self.hidden, 1)
 
     def bias_toward_forward(self, keys: list[str], reset_action: bool = False) -> None:
@@ -56,7 +67,8 @@ class StateActorCritic(nn.Module):
         if obs.ndim != 2 or obs.shape[-1] != self.obs_dim:
             raise ValueError(f"expected obs (B, {self.obs_dim}), got {tuple(obs.shape)}")
         hidden = self.net(obs)
-        return self.policy(hidden), self.value(hidden).squeeze(-1)
+        value = self.value(self.critic(obs)).squeeze(-1)
+        return self.policy(hidden), value
 
     def act(
         self,

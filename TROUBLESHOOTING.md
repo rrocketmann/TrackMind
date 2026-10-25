@@ -10,10 +10,14 @@ export PATH="$HOME/.local/node/bin:$PATH"   # node must be on PATH for the host
 
 ## Current plan
 
-The trainer is discrete SAC (`python scripts/train.py`, checkpoints in `runs/sac`).
-Each decision sees position, velocity, acceleration, meters of road left to the
-side, and the next gate. PPO and the hold-search numbers below are the record
-of what already failed. Do not resume `runs/summer1` into this SAC run.
+The trainer is PPO (`python scripts/train.py`, checkpoints in `runs/ppo-reward`).
+The critic is a separate network. Its target is the discounted return of the
+environment reward: the change in progress, the checkpoint bonus, and the time
+penalty. There is no entropy bonus inside that target. Each decision sees
+position, velocity, acceleration, meters of road left to the side, and the next
+gate. The SAC runs are the record of the critic scoring randomness instead of
+the road. See [DISCOVERIES.md](DISCOVERIES.md). Do not resume `runs/summer1`
+or `runs/sac` into this PPO run.
 
 ## Open problem: the learner does not find the good action
 
@@ -172,7 +176,8 @@ The attempts are in `runs/hold-frames/correction.json`.
 Do not add a fourth tap on this plan. The next lesson is a slower arrival at
 the lip (x≈180, z≈0, well under 190 km/h) that still has the speed to reach
 x=140. Keep it only when a replay has the wheels down again after x=140.
-Do not go back to PPO until that sticks.
+The trainer is PPO again. The SAC critic was scoring an entropy bonus, which
+is written up in [DISCOVERIES.md](DISCOVERIES.md).
 
 The env work below (velocity, slip, contact, the stall-floor bug) is sound and
 worth keeping regardless of which learner is used.

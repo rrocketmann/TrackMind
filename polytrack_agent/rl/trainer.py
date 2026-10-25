@@ -164,11 +164,12 @@ def train_ppo(
     env: SchoolagyTrack | None = None,
     max_updates: int | None = None,
 ) -> dict:
-    """Update the policy and the value head on the 0.6.3 car.
+    """Update the actor and the reward critic on the 0.6.3 car.
 
-    The actor sees the simulation's car state. Each press is scored with its
-    own advantage, and the PPO step trains both heads. A checkpoint resumes
-    only when its track matches.
+    The actor sees the simulation's car state. The critic is trained on the
+    discounted return of the environment reward, and the actor steps toward
+    actions with a higher advantage than that critic expected. A checkpoint
+    resumes only when its track matches.
     """
     rl_cfg = cfg["rl"]
     seed = rl_cfg.get("seed")

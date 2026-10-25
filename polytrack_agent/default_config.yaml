@@ -1,4 +1,4 @@
-# Discrete SAC on the PolyTrack 0.6.3 fork build at polytrack-0.6.3.
+# PPO on the PolyTrack 0.6.3 fork build at polytrack-0.6.3.
 # POLYTRACK_ROOT is that directory. The car is polytrack_physics.wasm.
 # The policy reads numbers only: position, velocity, acceleration, distance to
 # the side of the road, and where the next gate is.
@@ -11,7 +11,7 @@ game:
 keys: [w, a, s, d]
 
 rl:
-  algo: sac              # discrete soft actor-critic. ppo remains available.
+  algo: ppo              # actor plus a critic for the environment reward. sac remains available.
   seed: 0                # fixes Python, NumPy, and torch. null leaves them unseeded.
   sac:
     tau: 0.005
@@ -20,7 +20,8 @@ rl:
     learning_starts: 1000
     updates_per_step: 1
     init_alpha: 0.2
-    # target_entropy: null  # default is 0.98 * log(n_actions), just under uniform
+    alpha_lr: 0.00001      # SGD. Adam on this knob walks alpha to its clamp.
+    # target_entropy: null  # default is 0.6 * log(n_actions), low enough to hold one button
   action_repeat: 50      # physics frames per decision. The worker steps at 1 ms.
                          # Keep at 50: measured better than 10 for learning
                          # (see TROUBLESHOOTING, "the learner does not find the
@@ -43,11 +44,11 @@ rl:
   lr: 0.0003
   resume: true
   device: auto
-  out_dir: runs/sac
+  out_dir: runs/ppo-reward
   # stop_time: 25       # stop training once a lap finishes at or below this many seconds
 
 play:
-  checkpoint: runs/sac/best.pt
+  checkpoint: runs/ppo-reward/best.pt
   device: auto
 
 reward:

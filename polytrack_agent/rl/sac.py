@@ -53,6 +53,20 @@ class TwinQ(nn.Module):
         return self.q1(obs), self.q2(obs)
 
 
+def default_target_entropy(n_actions: int) -> float:
+    """Entropy of a policy that can hold one button down.
+
+    ``0.98 * log(|A|)`` is only a hair under a uniform draw. Entropy then has
+    almost no room to go higher, so a tiny deficit walks alpha up to its clamp
+    and the critic fits that bonus instead of the road. ``0.6 * log(|A|)``
+    leaves room for one of the nine chords to stay down.
+    """
+    count = int(n_actions)
+    if count < 2:
+        raise ValueError("n_actions must be at least 2")
+    return 0.6 * math.log(count)
+
+
 def temperature_loss(log_alpha: torch.Tensor, entropy: torch.Tensor, target_entropy: float) -> torch.Tensor:
     """Loss whose minimum raises alpha when entropy is below the target."""
     return (log_alpha * (entropy - float(target_entropy))).mean()
@@ -186,16 +200,16 @@ def train_sac(
     updates_per_step = max(1, int(sac_cfg.get("updates_per_step") or 1))
     target_entropy = sac_cfg.get("target_entropy")
     if target_entropy is None:
-        # Just under a uniform policy, which is the usual discrete-SAC target.
-        # A lower target drops the temperature while Q is still flat, and the
-        # chord distribution then locks onto whichever action was sampled.
-        target_entropy = 0.98 * math.log(chords)
+        target_entropy = default_target_entropy(chords)
     target_entropy = float(target_entropy)
     lr = float(rl_cfg.get("lr") or 3e-4)
     # No weight decay. AdamW's default decay shrinks Q toward zero and pulls alpha toward 1.
     actor_opt = torch.optim.Adam(list(actor.net.parameters()) + list(actor.policy.parameters()), lr=lr)
     q_opt = torch.optim.Adam(q.parameters(), lr=lr)
-    alpha_opt = torch.optim.Adam([log_alpha], lr=lr)
+    # SGD, not Adam. Adam turns a 0.001 entropy miss into a full-sized step and
+    # walks alpha to the clamp while the policy is still almost uniform.
+    alpha_lr = float(sac_cfg.get("alpha_lr") or 1e-5)
+    alpha_opt = torch.optim.SGD([log_alpha], lr=alpha_lr)
     meta = {
         "obs_dim": width,
         "hidden": hidden,

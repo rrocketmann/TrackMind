@@ -74,6 +74,23 @@ def _actor_weight(seed: int) -> torch.Tensor:
     return next(model.net.parameters()).detach().clone()
 
 
+def test_reward_critic_does_not_share_the_actor():
+    """A policy update must not move the critic, and a value update must not move the actor."""
+    model = StateActorCritic(4, 3, hidden=8)
+    obs = torch.zeros(2, 4)
+    actor_params = [p for name, p in model.named_parameters() if name.startswith(("net.", "policy."))]
+    critic_params = [p for name, p in model.named_parameters() if name.startswith(("critic.", "value."))]
+    logits, _value = model(obs)
+    logits.square().mean().backward()
+    assert any(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in actor_params)
+    assert all(p.grad is None for p in critic_params)
+    model.zero_grad()
+    _logits, value = model(obs)
+    value.square().mean().backward()
+    assert all(p.grad is None for p in actor_params)
+    assert any(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in critic_params)
+
+
 def test_same_seed_rebuilds_the_same_actor():
     assert torch.equal(_actor_weight(7), _actor_weight(7))
     assert not torch.equal(_actor_weight(7), _actor_weight(8))
@@ -143,6 +160,25 @@ def test_temperature_rises_when_entropy_is_low():
     temperature_loss(peaked, torch.tensor([2.0]), 0.1).backward()
     optimizer.step()
     assert float(peaked.detach()) < 0.0
+
+
+def test_tiny_entropy_gap_barely_moves_alpha():
+    """A 0.001 miss must not take a full optimizer step. Adam did, and alpha hit its clamp."""
+    from polytrack_agent.rl.sac import temperature_loss
+
+    log_alpha = nn.Parameter(torch.zeros(()))
+    optimizer = torch.optim.SGD([log_alpha], lr=1e-5)
+    temperature_loss(log_alpha, torch.tensor([1.0]), 1.001).backward()
+    optimizer.step()
+    assert float(log_alpha.detach()) == pytest.approx(1e-8)
+
+
+def test_default_entropy_target_can_hold_one_button():
+    from polytrack_agent.rl.sac import default_target_entropy
+
+    target = default_target_entropy(9)
+    assert target == pytest.approx(0.6 * math.log(9))
+    assert target < 0.9 * math.log(9)
 
 
 def test_discrete_sac_prefers_the_rewarded_action():

@@ -27,6 +27,8 @@ def ppo_loss(
     unclipped = ratio * advantages
     clipped = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * advantages
     policy_loss = -torch.minimum(unclipped, clipped).mean()
+    # `returns` is the discounted sum of the environment reward. The critic
+    # matches that, not a bonus for staying random.
     value_loss = (values - returns).pow(2).mean()
     entropy = dist.entropy().mean()
     loss = policy_loss + float(value_coef) * value_loss - float(entropy_coef) * entropy
