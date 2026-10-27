@@ -639,6 +639,7 @@ def test_parking_on_the_road_earns_no_contact_reward():
     cfg = load_config(None)
     cfg["rl"]["action_repeat"] = 10
     cfg["reward"]["contact_reward"] = 0.01
+    cfg["reward"]["time_penalty"] = 0.002
     env = make_track(cfg, client=_ParkedClient())
     try:
         env.reset()
@@ -649,6 +650,65 @@ def test_parking_on_the_road_earns_no_contact_reward():
         assert info["wheels_down"] == 4
         # Only the time penalty lands; a parked car cannot farm the contact term.
         assert reward < 0.0
+    finally:
+        env.close()
+
+
+class _PassingClient:
+    """Stays short of gate 0, then the index advances on the next step."""
+
+    def __init__(self):
+        self.checkpoint_count = 3
+        self.parts = []
+        self.frames = 0
+        self.steps = 0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        self.steps = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.frames = int(frames)
+        self.steps += 1
+        return self._state()
+
+    def _state(self) -> dict:
+        # Finish sits at the origin when the track has no parts. x=50 is halfway
+        # to gate 0. After the index advances the car is at that gate.
+        passed = self.steps >= 2
+        return {
+            "frames": self.frames,
+            "speedKmh": 80.0,
+            "velocity": {"x": -20.0, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 1 if passed else 0,
+            "position": {"x": 0.0 if passed else 50.0, "y": 0.0, "z": 0.0},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": [True, True, True, True],
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def test_passing_a_gate_pays_only_the_progress_change():
+    cfg = load_config(None)
+    cfg["reward"]["time_penalty"] = 0.0
+    cfg["reward"]["finish_bonus"] = 0.0
+    cfg["reward"]["progress_scale"] = 1.0
+    env = make_track(cfg, client=_PassingClient())
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        _frame, first, _done, info = env.step(forward)
+        assert first == pytest.approx(info["progress"])
+        before = info["progress"]
+        _frame, second, _done, info = env.step(forward)
+        assert info["state"]["nextCheckpointIndex"] == 1
+        # The old reward added another +1 on this step, on top of the progress jump.
+        assert second == pytest.approx(info["progress"] - before)
     finally:
         env.close()
 

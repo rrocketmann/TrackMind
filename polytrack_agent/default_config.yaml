@@ -44,17 +44,20 @@ rl:
   lr: 0.0003
   resume: true
   device: auto
-  out_dir: runs/ppo-reward
+  out_dir: runs/ppo-progress
   # stop_time: 25       # stop training once a lap finishes at or below this many seconds
 
 play:
-  checkpoint: runs/ppo-reward/best.pt
+  checkpoint: runs/ppo-progress/best.pt
   device: auto
 
 reward:
+  # The score is the change in progress. A gate and the finish are already
+  # inside that number, so they do not get a second bonus. There is no per-step
+  # time tax; discounting is what prefers getting further sooner.
   progress_scale: 1.0
-  time_penalty: 0.002
-  finish_bonus: 1.0
+  time_penalty: 0.0
+  finish_bonus: 0.0
   respawn_penalty: 0.0    # subtracted each time the car respawns at a checkpoint
   contact_reward: 0.0     # paid each step per wheel on the track surface, scaled by ground covered
   beach_penalty: 0.0      # charged once when every wheel leaves the ground and the car stalls

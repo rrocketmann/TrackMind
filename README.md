@@ -20,7 +20,7 @@ The observation is nineteen numbers plus a one-hot of the previous action:
 
 `speedKmh` is not in the observation. It comes from wheel rotation, so a car spinning its wheels against a wall or in mid-air still reads as moving. The velocity vector is the motion the policy sees, and it also drives the stall timer.
 
-Reward is the change in progress, minus a small time penalty, plus a bonus on the finish. Progress is the checkpoint index plus how far the car has driven since that checkpoint, capped just short of the next index. A finish scores one past the last checkpoint. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, or the time limit.
+Reward is the change in progress and nothing else. Progress is the checkpoint index plus how far the car has driven toward the next gate, capped just short of the next index. Passing a gate and finishing the lap are that number moving forward. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, or the time limit.
 
 PPO checkpoints use arch `polytrack-ppo-0.6.3`. SAC checkpoints use `polytrack-sac-0.6.3`. A checkpoint loads only when the arch, the track name, and the observation width match. `best.pt` is the highest mean progress in an update. The measurements are in [DISCOVERIES.md](DISCOVERIES.md).
 
@@ -52,7 +52,7 @@ python scripts/train.py
 python scripts/play.py --episodes 5
 ```
 
-`scripts/train.py` runs PPO until you stop it. It writes `runs/ppo-reward/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/ppo-reward/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode. The SAC runs stay in `runs/sac` and `runs/sac-blowup`. The older PPO run stays in `runs/summer1`.
+`scripts/train.py` runs PPO until you stop it. It writes `runs/ppo-progress/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/ppo-progress/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode. The fly-over run stays in `runs/ppo-reward`. The SAC runs stay in `runs/sac` and `runs/sac-blowup`. The older PPO run stays in `runs/summer1`.
 
 Training has not yet completed a lap. The env and the host are correct; the policy collapses onto the wrong action instead of holding throttle, which a constant action proves is worth far more. The measurements, what has been ruled out, and the plan are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md), under "the learner does not find the good action".
 
@@ -64,7 +64,7 @@ python scripts/train.py --stop-time 25
 
 Training saves `last.pt` and exits on the first lap at or below 25 s. The same field is `rl.stop_time` in a config overlay.
 
-`scripts/play.py --episodes 5` loads `runs/ppo-reward/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
+`scripts/play.py --episodes 5` loads `runs/ppo-progress/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
 
 ## First checkpoint
 

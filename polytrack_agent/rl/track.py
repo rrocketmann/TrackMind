@@ -251,7 +251,7 @@ class SchoolagyTrack:
         """Checkpoint index plus how much of the way to that gate is done.
 
         Closing the distance raises it. Driving away lowers it. Passing the
-        gate moves the index, which the step scores with its own bonus.
+        gate advances the index. That change is the whole score for the gate.
         """
         if finished:
             return float(self.client.checkpoint_count) + 1.0
@@ -290,11 +290,11 @@ class SchoolagyTrack:
         state = self._view(self.client.step(_controls(action_id, self.keys, self.reset_action), target))
         dt = max(0.0, (int(state["frames"]) - int(before["frames"])) * 0.001)
         finished = state["finishFrames"] is not None
-        previous = self._checkpoint
         progress = self._progress_of(state, finished)
+        # Progress already moves when a gate is passed and when the lap finishes.
+        # An extra bonus on those events made the first gate worth more than
+        # the rest of the lap, so the critic had nothing left to score.
         reward = (progress - self._progress) * self.progress_scale - self.time_penalty
-        if int(state["nextCheckpointIndex"]) > previous:
-            reward += 1.0
         self._progress = progress
         if finished:
             reward += self.finish_bonus
