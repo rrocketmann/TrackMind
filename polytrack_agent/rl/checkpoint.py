@@ -43,10 +43,14 @@ def bind_runtime(cfg: dict, payload: dict[str, Any]) -> dict:
         raise ValueError(
             f"checkpoint has {payload['n_actions']} chords but keys {keys} make {chords}"
         )
-    if int(payload["obs_dim"]) != obs_dim(chords):
-        raise ValueError(f"checkpoint obs_dim {payload['obs_dim']} does not match {obs_dim(chords)}")
+    window = int(payload.get("road_window") or 0)
+    if int(payload["obs_dim"]) != obs_dim(chords, window):
+        raise ValueError(
+            f"checkpoint obs_dim {payload['obs_dim']} does not match {obs_dim(chords, window)}"
+        )
     bound = copy.deepcopy(cfg)
     bound["keys"] = keys
+    bound.setdefault("rl", {})["road_window"] = window
     return bound
 
 

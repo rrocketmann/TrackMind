@@ -107,6 +107,18 @@ def cmd_bc(cfg: dict, args) -> int:
         seed = args.seed
     if seed is None:
         seed = 0
+    from polytrack_agent.rl.road import road_window_of
+
+    window = road_window_of(cfg)
+    course = None
+    if window:
+        from polytrack_agent.rl.track import make_track
+
+        env = make_track(cfg)
+        try:
+            course = env.road_course()
+        finally:
+            env.close()
     train_bc(
         Path(args.data),
         Path(args.out),
@@ -117,6 +129,8 @@ def cmd_bc(cfg: dict, args) -> int:
         seed=int(seed),
         epochs=int(args.epochs),
         patience=int(args.patience),
+        road_window=window,
+        course=course,
     )
     return 0
 

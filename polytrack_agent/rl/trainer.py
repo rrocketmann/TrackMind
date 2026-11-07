@@ -19,7 +19,8 @@ from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.ppo import ppo_update
 from polytrack_agent.rl.seed import set_seed
-from polytrack_agent.rl.state import LapNumbers, obs_dim
+from polytrack_agent.rl.road import road_window_of
+from polytrack_agent.rl.state import LapNumbers, extra_width, obs_dim
 
 log = logging.getLogger(__name__)
 
@@ -50,13 +51,14 @@ def nudge_entropy_coef(coef: float, entropy: float, target: float) -> float:
     return min(_ENTROPY_COEF_CAP, updated)
 
 
-def _meta(model: StateActorCritic, keys: list[str], track: str) -> dict:
+def _meta(model: StateActorCritic, keys: list[str], track: str, road_window: int = 0) -> dict:
     return {
         "obs_dim": int(model.obs_dim),
         "hidden": int(model.hidden),
         "n_actions": int(model.n_actions),
         "keys": list(keys),
         "track": track,
+        "road_window": int(road_window),
     }
 
 
@@ -122,9 +124,15 @@ def _begin(env: SchoolagyTrack, numbers: LapNumbers) -> None:
     numbers.advance(env.reset(restart=True), -1)
 
 
-def _spawn_policy(model: StateActorCritic, env: SchoolagyTrack, device: torch.device) -> tuple[str, dict[str, float]]:
+def _spawn_policy(
+    model: StateActorCritic,
+    env: SchoolagyTrack,
+    device: torch.device,
+    road=None,
+    road_window: int = 0,
+) -> tuple[str, dict[str, float]]:
     """Softmax over chords at the spawn, after a fresh restart. No unimix."""
-    numbers = LapNumbers(model.n_actions)
+    numbers = LapNumbers(model.n_actions, road=road, road_window=road_window)
     numbers.reset()
     numbers.advance(env.reset(restart=True), -1)
     observation = torch.from_numpy(numbers.vector()).unsqueeze(0).to(device)
@@ -214,7 +222,18 @@ def train_ppo(
         env = make_track(cfg)
     chords = n_actions(env.keys, reset_action=getattr(env, "reset_action", False))
     hidden = int(rl_cfg.get("hidden") or 128)
-    model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
+    road_window = road_window_of(cfg)
+    course = env.road_course() if road_window else None
+    if road_window:
+        log.info(
+            "Road window %s (%s road numbers, %s extra car numbers), %.0f m in %s pieces",
+            road_window,
+            road_window * 5,
+            extra_width(road_window),
+            0.0 if course is None else course.length,
+            0 if course is None else len(course.segments),
+        )
+    model = StateActorCritic(obs_dim=obs_dim(chords, road_window), n_actions=chords, hidden=hidden).to(device)
     out_dir = Path(rl_cfg.get("out_dir") or "runs/ppo")
     out_dir.mkdir(parents=True, exist_ok=True)
     resumed = bool(rl_cfg.get("resume", True)) and _resume(out_dir / "last.pt", model, device, track)
@@ -231,7 +250,7 @@ def train_ppo(
     target_entropy = rl_cfg.get("target_entropy")
     if target_entropy is not None:
         log.info("Entropy target %.3f, bonus starts at %.5f", float(target_entropy), entropy_coef)
-    meta = _meta(model, env.keys, track)
+    meta = _meta(model, env.keys, track, road_window)
     log_path = out_dir / "log.csv"
     best_progress = -1.0
     best_path = out_dir / "best.pt"
@@ -254,7 +273,7 @@ def train_ppo(
     if stop_time_s is not None:
         log.info("Stopping once a lap finishes at or below %.2fs.", stop_time_s)
 
-    numbers = LapNumbers(chords)
+    numbers = LapNumbers(chords, road=course, road_window=road_window)
     rows: list[dict] = []
     _begin(env, numbers)
     updates = 0
@@ -428,7 +447,7 @@ def train_ppo(
         log.info("Stopped.")
     finally:
         try:
-            spawn_chord, spawn_probs = _spawn_policy(model, env, device)
+            spawn_chord, spawn_probs = _spawn_policy(model, env, device, road=course, road_window=road_window)
             throttle_name = "w" if "w" in spawn_probs else "up"
             log.info(
                 "spawn policy top %s (%.2f), straight throttle %.2f",

@@ -21,7 +21,8 @@ from polytrack_agent.rl.checkpoint import save_checkpoint
 from polytrack_agent.rl.device import configure_torch, resolve_device
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.seed import set_seed
-from polytrack_agent.rl.state import FEATURES, obs_dim
+from polytrack_agent.rl.road import road_width
+from polytrack_agent.rl.state import FEATURES, NAMES, checkpoint_from_scaled, extra_from_scaled, extra_width, obs_dim
 
 log = logging.getLogger(__name__)
 
@@ -34,13 +35,21 @@ _GAP_S = _DECISION_S * 1.5
 def pairs_from_rows(
     rows: list,
     n_actions: int = 9,
+    road_window: int = 0,
+    course=None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Stack (features + previous hold) and the hold taken on that row.
+    """Stack (features + extra car + road + previous hold) and the hold on that row.
 
     A row is skipped when the hold id or the nineteen numbers are missing.
     The first row, and the first row after a gap, has no previous hold.
+    `road_window` 0 leaves the row as the nineteen numbers plus the hold.
+    A wider window inserts the extra car numbers, then the road. Spin, skid,
+    and suspension are not in a row, so those stay 0.
     """
-    width = FEATURES + int(n_actions)
+    window = int(road_window)
+    extra_n = extra_width(window)
+    road_n = road_width(window)
+    width = FEATURES + extra_n + road_n + int(n_actions)
     observations: list[np.ndarray] = []
     actions: list[int] = []
     previous = -1
@@ -76,8 +85,13 @@ def pairs_from_rows(
         if not np.isfinite(vector[:FEATURES]).all():
             previous = -1
             continue
+        if extra_n:
+            vector[FEATURES : FEATURES + extra_n] = extra_from_scaled(vector[:FEATURES], course)
+        if window and course is not None:
+            block = _road_block(vector, course, window)
+            vector[FEATURES + extra_n : FEATURES + extra_n + road_n] = block
         if 0 <= previous < int(n_actions):
-            vector[FEATURES + previous] = 1.0
+            vector[FEATURES + extra_n + road_n + previous] = 1.0
         observations.append(vector)
         actions.append(int(action))
         previous = int(action)
@@ -87,6 +101,18 @@ def pairs_from_rows(
             np.zeros((0,), dtype=np.int64),
         )
     return np.stack(observations), np.asarray(actions, dtype=np.int64)
+
+
+def _road_block(vector: np.ndarray, course, window: int) -> np.ndarray:
+    """Road ahead at this row. x, y, z in the row are scaled by 200."""
+    x = float(vector[NAMES.index("x")]) * 200.0
+    y = float(vector[NAMES.index("y")]) * 200.0
+    z = float(vector[NAMES.index("z")]) * 200.0
+    index = checkpoint_from_scaled(
+        float(vector[NAMES.index("checkpoint")]),
+        int(getattr(course, "gate_count", 0) or 0),
+    )
+    return course.ahead(x, y, z, int(window), checkpoint=index)
 
 
 def _read_run(path: Path) -> dict:
@@ -111,6 +137,8 @@ def load_track_pairs(
     n_actions: int,
     seed: int,
     val_fraction: float = 0.2,
+    road_window: int = 0,
+    course=None,
 ) -> dict:
     """Load one campaign track. Whole laps are held out, not single rows."""
     index_path = Path(root) / "laps" / "index.jsonl"
@@ -143,7 +171,12 @@ def load_track_pairs(
         if not _dense(run, int(row.get("frames") or 0)):
             skipped += 1
             continue
-        observations, actions = pairs_from_rows(run["rows"], n_actions=n_actions)
+        observations, actions = pairs_from_rows(
+            run["rows"],
+            n_actions=n_actions,
+            road_window=road_window,
+            course=course,
+        )
         if len(actions) < 10:
             skipped += 1
             continue
@@ -213,12 +246,22 @@ def train_bc(
     batch_size: int = 1024,
     lr: float = 1e-3,
     n_actions: int = 9,
+    road_window: int = 0,
+    course=None,
 ) -> dict:
     """Fit the actor on held-out laps and write best.pt when val loss improves."""
     set_seed(int(seed))
     device = resolve_device("auto")
     configure_torch(device)
-    loaded = load_track_pairs(Path(root), track_name, int(n_actions), int(seed))
+    window = int(road_window)
+    loaded = load_track_pairs(
+        Path(root),
+        track_name,
+        int(n_actions),
+        int(seed),
+        road_window=window,
+        course=course,
+    )
     train_act = loaded["train_act"]
     counts = np.bincount(train_act, minlength=int(n_actions))
     majority = float(counts.max()) / float(len(train_act))
@@ -232,7 +275,7 @@ def train_bc(
         majority,
     )
     model = StateActorCritic(
-        obs_dim=obs_dim(int(n_actions)),
+        obs_dim=obs_dim(int(n_actions), window),
         n_actions=int(n_actions),
         hidden=int(hidden),
     ).to(device)
@@ -247,6 +290,7 @@ def train_bc(
         "n_actions": int(model.n_actions),
         "keys": keys,
         "track": track_stem,
+        "road_window": window,
         "update": 0,
         "progress": -1.0,
     }

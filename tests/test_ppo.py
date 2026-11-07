@@ -1108,6 +1108,13 @@ def test_throttle_moves_the_sim_car():
         # whole run rather than a fixed later window.
         assert moved > 1.0
         assert int(info["state"]["frames"]) > 1
+        spin = info["state"].get("angularVelocity")
+        assert isinstance(spin, dict)
+        assert math.isfinite(float(spin["y"]))
+        assert len(info["state"]["wheelSkidInfo"]) == 4
+        assert len(info["state"]["wheelSuspensionLength"]) == 4
+        assert len(info["state"]["wheelSuspensionVelocity"]) == 4
+        assert len(info["state"]["wheelNormal"]) == 4
     finally:
         env.close()
 

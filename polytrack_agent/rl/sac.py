@@ -23,6 +23,7 @@ from polytrack_agent.rl.device import configure_torch, resolve_device
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.replay import Replay
 from polytrack_agent.rl.seed import set_seed
+from polytrack_agent.rl.road import road_window_of
 from polytrack_agent.rl.state import LapNumbers, obs_dim
 from polytrack_agent.rl.track import SchoolagyTrack, make_track
 
@@ -183,7 +184,9 @@ def train_sac(
         env = make_track(cfg)
     chords = n_actions(env.keys, reset_action=getattr(env, "reset_action", False))
     hidden = int(rl_cfg.get("hidden") or 128)
-    width = obs_dim(chords)
+    road_window = road_window_of(cfg)
+    course = env.road_course() if road_window else None
+    width = obs_dim(chords, road_window)
     actor = StateActorCritic(obs_dim=width, n_actions=chords, hidden=hidden).to(device)
     q = TwinQ(width, chords, hidden).to(device)
     q_target = copy.deepcopy(q).to(device)
@@ -216,6 +219,7 @@ def train_sac(
         "n_actions": chords,
         "keys": list(env.keys),
         "track": track,
+        "road_window": road_window,
     }
     resumed = False
     last_path = out_dir / "last.pt"
@@ -247,7 +251,7 @@ def train_sac(
     log_path = out_dir / "log.csv"
     best_progress = -1.0
     best_path = out_dir / "best.pt"
-    numbers = LapNumbers(chords)
+    numbers = LapNumbers(chords, road=course, road_window=road_window)
     rows: list[dict] = []
     updates = 0
     episode_returns: list[float] = []
@@ -380,7 +384,7 @@ def train_sac(
         log.info("Stopped.")
     finally:
         try:
-            spawn_chord, spawn_probs = _spawn_policy(actor, env, device)
+            spawn_chord, spawn_probs = _spawn_policy(actor, env, device, road=course, road_window=road_window)
             throttle_name = "w" if "w" in spawn_probs else "up"
             log.info(
                 "spawn policy top %s (%.2f), straight throttle %.2f",

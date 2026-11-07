@@ -43,6 +43,15 @@ rl:
   unimix: 0.01
   group_size: 4          # laps collected before one PPO update
   hidden: 128
+  # 0 keeps the nineteen car numbers plus the previous button. The next run
+  # sets this to 8 in a new directory. That appends the road ahead (how long,
+  # which way it bends, its slope, and how much road is on the left and the
+  # right) and the rest of the car: height above the road, nose and roll,
+  # speed and spin in the car's own axes, each wheel, skid, suspension, and
+  # the tilt of the ground under the tyres.
+  # Those added numbers do not use the map position. Leave this at 0 so a
+  # saved run still loads.
+  road_window: 0
   lr: 0.0003
   resume: true
   device: auto

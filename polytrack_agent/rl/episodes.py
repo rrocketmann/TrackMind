@@ -23,7 +23,9 @@ def run_episodes(cfg: dict, checkpoint: Path, episodes: int) -> list[dict]:
     cfg = bind_runtime(cfg, payload)
     model = load_actor(payload, device)
     env = make_track(cfg)
-    numbers = LapNumbers(int(payload["n_actions"]))
+    window = int(payload.get("road_window") or 0)
+    course = env.road_course() if window else None
+    numbers = LapNumbers(int(payload["n_actions"]), road=course, road_window=window)
     rows: list[dict] = []
     try:
         for episode in range(1, int(episodes) + 1):

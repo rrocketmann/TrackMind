@@ -66,6 +66,10 @@ function patchWorker(source) {
                 const v = S_(this, JA, "f").getLinearVelocity();
                 return { x: v.x(), y: v.y(), z: v.z() };
             }
+            getAngularVelocity() {
+                const w = S_(this, JA, "f").getAngularVelocity();
+                return { x: w.x(), y: w.y(), z: w.z() };
+            }
             getPosition() {
                 return S_(this, a_, "f")
             }`,
@@ -78,9 +82,15 @@ function patchWorker(source) {
                         // freely in the air. The chassis velocity is the honest
                         // one; the slip angle the steering assist keys on needs
                         // it. wheelSkidInfo is how much each tyre is sliding.
+                        // Angular velocity is not in the posted car, so read it
+                        // from the same body as the linear velocity.
                         velocity: (() => {
                           const v = r.getVelocity && r.getVelocity();
                           return v ? { x: v.x, y: v.y, z: v.z } : null;
+                        })(),
+                        angularVelocity: (() => {
+                          const w = r.getAngularVelocity && r.getAngularVelocity();
+                          return w ? { x: w.x, y: w.y, z: w.z } : null;
                         })(),
                         hasStarted: r.hasStarted(),`,
     ],
@@ -270,20 +280,46 @@ function decodeCarState(buffer) {
   };
 }
 
+function finite4(raw) {
+  const out = [0, 0, 0, 0];
+  if (!Array.isArray(raw)) return out;
+  for (let index = 0; index < 4; index += 1) {
+    const value = Number(raw[index]);
+    out[index] = Number.isFinite(value) ? value : 0;
+  }
+  return out;
+}
+
+function vec3(raw) {
+  if (!raw || !Number.isFinite(Number(raw.x)) || !Number.isFinite(Number(raw.y)) || !Number.isFinite(Number(raw.z))) {
+    return null;
+  }
+  return { x: Number(raw.x), y: Number(raw.y), z: Number(raw.z) };
+}
+
 function carStateFromObject(raw) {
   const contact = raw.wheelContact || [];
   const position = raw.position || {};
   const quaternion = raw.quaternion || {};
   const velocity = raw.velocity || null;
+  const angular = raw.angularVelocity || null;
   return {
     frames: raw.frames,
     speedKmh: raw.speedKmh,
     velocity: velocity ? { x: velocity.x, y: velocity.y, z: velocity.z } : null,
+    angularVelocity: angular ? { x: angular.x, y: angular.y, z: angular.z } : null,
     finishFrames: raw.finishFrames === undefined ? null : raw.finishFrames,
     nextCheckpointIndex: raw.nextCheckpointIndex,
     position: { x: position.x, y: position.y, z: position.z },
     quaternion: { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w },
     wheels: [0, 1, 2, 3].map((index) => !!contact[index]),
+    wheelNormal: [0, 1, 2, 3].map((index) => {
+      const hit = contact[index];
+      return hit && hit.normal ? vec3(hit.normal) : null;
+    }),
+    wheelSkidInfo: finite4(raw.wheelSkidInfo),
+    wheelSuspensionLength: finite4(raw.wheelSuspensionLength),
+    wheelSuspensionVelocity: finite4(raw.wheelSuspensionVelocity),
   };
 }
 

@@ -485,6 +485,16 @@ class SchoolagyTrack:
                 return index
         return 0
 
+    def road_course(self):
+        """Straights, curves, and slopes ahead. Built once from the placed pieces."""
+        cached = getattr(self, "_road_course", None)
+        if cached is not None:
+            return cached
+        from polytrack_agent.rl.road import course_from_parts
+
+        self._road_course = course_from_parts(getattr(self.client, "parts", None) or [])
+        return self._road_course
+
     def close(self) -> None:
         self.client.close()
 
