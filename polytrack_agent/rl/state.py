@@ -1,7 +1,9 @@
 """Car-state observation from the PolyTrack 0.6.3 simulation. No pixels.
 
-Each decision sees a short list of numbers: where the car is, how it is moving,
-how that motion is changing, and how much road is left to the side.
+Recorded laps store nineteen scaled numbers. The specialist policy sees the
+ones it uses to steer: motion, heading, how much road is left, and where the
+next gate is. Position, acceleration, and gate distance stay in the recording
+for a world model. They are not inputs here.
 """
 
 from __future__ import annotations
@@ -10,8 +12,8 @@ import math
 
 import numpy as np
 
-# Order is the observation layout. Scales below keep a Summer 1 lap near ±1.
-NAMES = (
+# Order of `n` in a TrackData lap. Scales below match that recording.
+RECORDED = (
     "x",
     "y",
     "z",
@@ -32,7 +34,27 @@ NAMES = (
     "gate_distance",
     "checkpoint",
 )
+# Driving inputs. World position and acceleration are not needed once velocity,
+# heading, the road edge, and the next gate are known. Gate distance repeats
+# gate_right and gate_forward.
+NAMES = (
+    "vx",
+    "vy",
+    "vz",
+    "forward_x",
+    "forward_z",
+    "upright",
+    "wheels",
+    "border",
+    "border_side",
+    "gate_right",
+    "gate_forward",
+    "checkpoint",
+)
+_RECORDED_INDEX = {name: index for index, name in enumerate(RECORDED)}
+POLICY_INDEX = tuple(_RECORDED_INDEX[name] for name in NAMES)
 FEATURES = len(NAMES)
+RECORDED_FEATURES = len(RECORDED)
 _POS = 200.0
 _VEL = 40.0
 _ACC = 40.0
@@ -44,6 +66,13 @@ def obs_dim(n_actions: int) -> int:
     if int(n_actions) < 1:
         raise ValueError("n_actions must be positive")
     return FEATURES + int(n_actions)
+
+
+def project_recorded(recorded: list[float] | tuple[float, ...]) -> list[float]:
+    """Keep the driving numbers from one recorded 19-vector."""
+    if len(recorded) != RECORDED_FEATURES:
+        raise ValueError(f"expected {RECORDED_FEATURES} recorded numbers, got {len(recorded)}")
+    return [float(recorded[index]) for index in POLICY_INDEX]
 
 
 def _features(state: dict, acceleration: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> list[float]:
@@ -101,6 +130,13 @@ def _features(state: dict, acceleration: tuple[float, float, float] = (0.0, 0.0,
     ]
 
 
+def _policy_features(state: dict, acceleration: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> list[float]:
+    recorded = _features(state, acceleration)
+    if len(recorded) != RECORDED_FEATURES:
+        raise RuntimeError(f"expected {RECORDED_FEATURES} recorded numbers, got {len(recorded)}")
+    return project_recorded(recorded)
+
+
 class LapNumbers:
     """The numbers a decision is allowed to see."""
 
@@ -132,7 +168,7 @@ class LapNumbers:
         else:
             acceleration = (0.0, 0.0, 0.0)
         self._velocity = current
-        features = _features(state, acceleration)
+        features = _policy_features(state, acceleration)
         if len(features) != FEATURES:
             raise RuntimeError(f"expected {FEATURES} car features, got {len(features)}")
         self._vector[:FEATURES] = np.asarray(features, dtype=np.float32)

@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from polytrack_agent.rl.bc import behavior_clone, load_demos
 from polytrack_agent.rl.device import resolve_device
 from polytrack_agent.rl.track import SchoolagyTrack, make_track
 from polytrack_agent.rl.actions import chord_name, n_actions
@@ -66,6 +67,23 @@ def _episode_gae(
     if offset != len(rewards):
         raise RuntimeError(f"GAE saw {offset} steps and the rollout has {len(rewards)}")
     return np.concatenate(advantages), np.concatenate(returns)
+
+
+def _checkpoint_matches(path: Path, track: str, chords: int, width: int, hidden: int) -> bool:
+    """True when last.pt is this actor, so a warm start must not replace it."""
+    if not path.is_file():
+        return False
+    try:
+        payload = read_checkpoint(path, torch.device("cpu"))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return (
+        payload.get("track") == track
+        and payload.get("arch") == ARCH
+        and int(payload.get("n_actions") or -1) == chords
+        and int(payload.get("obs_dim") or -1) == width
+        and int(payload.get("hidden") or -1) == hidden
+    )
 
 
 def _resume(path: Path, model: StateActorCritic, device: torch.device, track: str) -> bool:
@@ -164,12 +182,12 @@ def train_ppo(
     env: SchoolagyTrack | None = None,
     max_updates: int | None = None,
 ) -> dict:
-    """Update the actor and the reward critic on the 0.6.3 car.
+    """Update the actor and the reward critic on one 0.6.3 track.
 
-    The actor sees the simulation's car state. The critic is trained on the
-    discounted return of the environment reward, and the actor steps toward
-    actions with a higher advantage than that critic expected. A checkpoint
-    resumes only when its track matches.
+    The actor sees velocity, heading, the road edge, and the next gate. Unless
+    a checkpoint resumes, it first clones the fastest TrackData laps of the
+    most common track. The critic is trained on the discounted return of the
+    environment reward. A checkpoint resumes only when its track matches.
     """
     rl_cfg = cfg["rl"]
     seed = rl_cfg.get("seed")
@@ -181,18 +199,62 @@ def train_ppo(
         # benchmark picks kernels from shapes, which changes the result across runs.
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+    bc_cfg = dict(rl_cfg.get("bc") or {})
+    bc_on = bool(bc_cfg.get("enabled", True))
+    out_dir = Path(rl_cfg.get("out_dir") or "runs/winter4")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    keys = list(cfg.get("keys") or ["w", "a", "s", "d"])
+    hidden = int(rl_cfg.get("hidden") or 128)
+    reset_action = bool(rl_cfg.get("reset_action"))
+    chords_planned = n_actions(keys, reset_action=reset_action)
+    # A resumed actor already has weights. Cloning again would overwrite them.
+    resuming = bool(rl_cfg.get("resume", True)) and _checkpoint_matches(
+        out_dir / "last.pt",
+        Path(cfg["game"]["track"]).stem,
+        chords_planned,
+        obs_dim(chords_planned),
+        hidden,
+    )
+    demos = None
+    if bc_on and not resuming and env is None:
+        demos = load_demos(bc_cfg, keys)
+        cfg["game"]["track"] = demos.track_file
+        log.info(
+            "BC warm start from %s laps of %s at or under %.3fs (best %.3fs, margin %.3fs, %s decisions).",
+            demos.laps,
+            demos.track,
+            demos.best_seconds + demos.margin_s,
+            demos.best_seconds,
+            demos.margin_s,
+            demos.steps,
+        )
     track = Path(cfg["game"]["track"]).stem
     log.info("PPO device %s (%s) track %s seed %s", device, hardware, track, "unset" if seed is None else int(seed))
     own_env = env is None
     if env is None:
         env = make_track(cfg)
     chords = n_actions(env.keys, reset_action=getattr(env, "reset_action", False))
-    hidden = int(rl_cfg.get("hidden") or 128)
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
-    out_dir = Path(rl_cfg.get("out_dir") or "runs/ppo")
-    out_dir.mkdir(parents=True, exist_ok=True)
     resumed = bool(rl_cfg.get("resume", True)) and _resume(out_dir / "last.pt", model, device, track)
-    if not resumed:
+    if resumed:
+        demos = None
+    elif demos is not None:
+        stats = behavior_clone(
+            model,
+            demos,
+            epochs=int(bc_cfg.get("epochs") or 5),
+            batch_size=int(bc_cfg.get("batch_size") or 256),
+            lr=float(bc_cfg.get("lr") or 1e-3),
+            device=device,
+        )
+        log.info(
+            "Cloned %s decisions from %s laps. Loss %.4f, accuracy %.3f.",
+            int(stats["steps"]),
+            int(stats["laps"]),
+            stats["loss"],
+            stats["accuracy"],
+        )
+    else:
         model.bias_toward_forward(env.keys, reset_action=getattr(env, "reset_action", False))
     model.eval()
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(rl_cfg.get("lr") or 3e-4))
@@ -221,8 +283,10 @@ def train_ppo(
     stop_at = None if stop_progress is None else float(stop_progress)
     stop_time = rl_cfg.get("stop_time")
     stop_time_s = None if stop_time is None else float(stop_time)
+    if stop_time_s is None and demos is not None:
+        stop_time_s = float(demos.best_seconds)
     if stop_time_s is not None:
-        log.info("Stopping once a lap finishes at or below %.2fs.", stop_time_s)
+        log.info("Stopping once a lap finishes at or below %.3fs.", stop_time_s)
 
     numbers = LapNumbers(chords)
     rows: list[dict] = []

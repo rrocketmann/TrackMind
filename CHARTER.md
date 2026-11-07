@@ -1,9 +1,9 @@
 # Specialist
 
-This branch trains one policy until it finishes one track cleanly.
+This branch trains one policy until it matches the best archived lap of one track.
 
-The track is Summer 1 (`tracks/official/summer1.track`). The environment is the polytrack fork 0.6.3 worker in `polytrack-0.6.3`. The learner is the PPO actor and critic already in `polytrack_agent/rl`. A perfect run is a finished lap at or under the seconds passed to `python scripts/train.py --stop-time`.
+The track is whichever official track has the most laps in TrackData. That is Winter 4. PPO starts from a behavioral clone of the clean laps within 0.5 s of the fastest time there. The actor sees velocity, heading, the road edge, the next gate, and the previous chord. It does not see world position, acceleration, or gate distance.
 
-Work here stays on that lap: the Summer 1 observation, the progress reward, and the policy that drives it. A dynamics model and a policy meant to transfer to other tracks belong on `world-model`.
+The environment is the polytrack fork 0.6.3 worker. A perfect run is a finished lap at or under that best archived time. A dynamics model and a policy meant to transfer belong on `world-model`.
 
 The program steps the local worker. It does not open an external page, read its memory, or submit a time.

@@ -1,6 +1,6 @@
-# PolyTrack agent
+# PolyTrack specialist
 
-PPO on the PolyTrack 0.6.3 car in the polytrack fork at `polytrack-0.6.3`. The game's own `polytrack_physics.wasm` is the environment. The actor reads the car state and picks one key hold. A separate critic scores the discounted return of the driving reward. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
+PPO on one PolyTrack 0.6.3 track in the polytrack fork at `polytrack-0.6.3`. The game's own `polytrack_physics.wasm` is the environment. Before the first PPO update, the actor clones the fastest TrackData laps of the most common track. A separate critic scores the discounted return of the driving reward. That is the same shape as Linesight: a real simulation, numeric state in, a discrete action out, stepped faster than the screen.
 
 `POLYTRACK_ROOT` points at that 0.6.3 directory. It contains `simulation_worker.bundle.js` and `polytrack_physics.wasm`. This program does not open any external page, read its memory, or submit a leaderboard time.
 
@@ -10,19 +10,21 @@ PPO on the PolyTrack 0.6.3 car in the polytrack fork at `polytrack-0.6.3`. The g
 
 Each decision holds W, A, S, and D for 50 physics frames (50 ms). The worker ticks at 1 ms. Those four keys are the whole control set. Air pitch and roll reuse them while the car is off the ground. The nine actions are the exclusive combinations: throttle or brake or neither, and left or right or straight. Restart is not an action. An episode reset deletes the car and creates it at the start. The in-game respawn key would put the car back on the last checkpoint, so the trainer does not send it.
 
-The observation is nineteen numbers plus a one-hot of the previous action:
+The observation is twelve numbers plus a one-hot of the previous action:
 
-- position, velocity, and acceleration
+- velocity
 - heading on the ground plane, uprightness, and how many wheels are down
 - meters of road left to the side, and which side the edge is on
-- where the next gate sits in the car frame: right, forward, and distance
+- where the next gate sits in the car frame: right and forward
 - the next checkpoint divided by the checkpoint count
+
+World position, acceleration, and gate distance are in the TrackData rows and are not given to this policy.
 
 `speedKmh` is not in the observation. It comes from wheel rotation, so a car spinning its wheels against a wall or in mid-air still reads as moving. The velocity vector is the motion the policy sees, and it also drives the stall timer.
 
 Reward is the change in progress and nothing else. Progress is the checkpoint index plus how far the car has driven toward the next gate, capped just short of the next index. Passing a gate and finishing the lap are that number moving forward. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, or the time limit.
 
-PPO checkpoints use arch `polytrack-ppo-0.6.3`. SAC checkpoints use `polytrack-sac-0.6.3`. A checkpoint loads only when the arch, the track name, and the observation width match. `best.pt` is the highest mean progress in an update. The measurements are in [DISCOVERIES.md](DISCOVERIES.md).
+PPO checkpoints use arch `polytrack-specialist-0.6.3`. SAC checkpoints use `polytrack-sac-0.6.3`. A checkpoint loads only when the arch, the track name, and the observation width match. `best.pt` is the highest mean progress in an update. The measurements are in [DISCOVERIES.md](DISCOVERIES.md).
 
 ## Setup
 
@@ -52,7 +54,7 @@ python scripts/train.py
 python scripts/play.py --episodes 5
 ```
 
-`scripts/train.py` runs PPO until you stop it. It writes `runs/ppo-progress/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/ppo-progress/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode. The fly-over run stays in `runs/ppo-reward`. The SAC runs stay in `runs/sac` and `runs/sac-blowup`. The older PPO run stays in `runs/summer1`.
+`scripts/train.py` clones the best TrackData laps, then runs PPO until a lap matches that time or you stop it. It writes `runs/winter4/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/winter4/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode. The fly-over run stays in `runs/ppo-reward`. The SAC runs stay in `runs/sac` and `runs/sac-blowup`. The older PPO run stays in `runs/summer1`.
 
 Training has not yet completed a lap. The env and the host are correct; the policy collapses onto the wrong action instead of holding throttle, which a constant action proves is worth far more. The measurements, what has been ruled out, and the plan are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md), under "the learner does not find the good action".
 
@@ -64,7 +66,7 @@ python scripts/train.py --stop-time 25
 
 Training saves `last.pt` and exits on the first lap at or below 25 s. The same field is `rl.stop_time` in a config overlay.
 
-`scripts/play.py --episodes 5` loads `runs/ppo-progress/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
+`scripts/play.py --episodes 5` loads `runs/winter4/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
 
 ## First checkpoint
 
@@ -114,7 +116,7 @@ The recorder script (`scripts/record.mjs`) that captured the real PolyTrack page
 | `reward.stall_penalty` | per-step cost for sitting on the road without covering ground |
 | `reward.speed_reward` / `speed_cap_kmh` | per-step pay for ground speed while the wheels are down, and the speed where it stops growing |
 
-The default track is `tracks/official/summer1.track`. Any other official or community `.track` in that checkout works after the same parts dump. The dump is the page's track-piece catalog, shared across tracks. It also stores the car collision hull and the mass offset from that same Init message. The 0.6.3 hull in `models/car.glb` is Draco-compressed, so the host cannot read it from the file. Mountains still come from the game's random table in `main.bundle.js`.
+The default track is `tracks/official/winter4.track`, the official track with the most laps in TrackData. Training replaces that path when another track becomes the most common. Any other official or community `.track` in that checkout works after the same parts dump. The dump is the page's track-piece catalog, shared across tracks. It also stores the car collision hull and the mass offset from that same Init message. The 0.6.3 hull in `models/car.glb` is Draco-compressed, so the host cannot read it from the file. Mountains still come from the game's random table in `main.bundle.js`.
 
 ## Layout
 

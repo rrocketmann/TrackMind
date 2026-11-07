@@ -12,7 +12,7 @@ from polytrack_agent.rl.actions import n_actions
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.state import obs_dim
 
-ARCH = "polytrack-ppo-0.6.3"
+ARCH = "polytrack-specialist-0.6.3"
 SAC_ARCH = "polytrack-sac-0.6.3"
 
 
@@ -52,8 +52,10 @@ def bind_runtime(cfg: dict, payload: dict[str, Any]) -> dict:
 
 def load_actor(payload: dict[str, Any], device: torch.device) -> StateActorCritic:
     arch = payload.get("arch")
-    if arch not in (ARCH, SAC_ARCH, "schoolagy-ppo-v1"):
-        raise ValueError(f"expected {ARCH}, {SAC_ARCH}, or schoolagy-ppo-v1, got {arch}")
+    if arch not in (ARCH, SAC_ARCH, "polytrack-ppo-0.6.3", "schoolagy-ppo-v1"):
+        raise ValueError(
+            f"expected {ARCH}, {SAC_ARCH}, polytrack-ppo-0.6.3, or schoolagy-ppo-v1, got {arch}"
+        )
     model = StateActorCritic(
         obs_dim=int(payload["obs_dim"]),
         n_actions=int(payload["n_actions"]),

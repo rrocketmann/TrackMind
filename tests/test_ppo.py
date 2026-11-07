@@ -20,7 +20,7 @@ from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.hold import id_named
 from polytrack_agent.rl.ppo import ppo_loss
-from polytrack_agent.rl.state import FEATURES, NAMES, LapNumbers, obs_dim
+from polytrack_agent.rl.state import FEATURES, NAMES, RECORDED, LapNumbers, obs_dim, project_recorded
 from polytrack_agent.rl.track import game_root, make_track, road_border
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.seed import set_seed
@@ -266,6 +266,7 @@ def test_observation_is_car_state_plus_previous_action():
         0,
     )
     vector = numbers.vector()
+    assert "x" not in NAMES and "ax" not in NAMES and "gate_distance" not in NAMES
     assert obs_dim(9) == FEATURES + 9
     assert vector.shape == (obs_dim(9),)
     assert vector[NAMES.index("vx")] == pytest.approx(0.5)
@@ -885,7 +886,13 @@ def test_acceleration_is_the_change_in_velocity():
     numbers.advance({"dt": 0.05, "state": moving}, 0)
     vector = numbers.vector()
     assert vector[NAMES.index("vx")] == pytest.approx(2.0 / 40.0)
-    assert vector[NAMES.index("ax")] == pytest.approx((2.0 / 0.05) / 40.0)
+    assert "ax" not in NAMES
+    recorded = [0.0] * len(RECORDED)
+    recorded[RECORDED.index("ax")] = (2.0 / 0.05) / 40.0
+    recorded[RECORDED.index("vx")] = 2.0 / 40.0
+    projected = project_recorded(recorded)
+    assert projected[NAMES.index("vx")] == pytest.approx(2.0 / 40.0)
+    assert len(projected) == len(NAMES)
 
 
 def test_throttle_moves_the_sim_car():
@@ -969,10 +976,11 @@ def test_one_ppo_update_on_the_sim(tmp_path):
     cfg["rl"]["hidden"] = 32
     cfg["rl"]["device"] = "cpu"
     cfg["rl"]["resume"] = False
+    cfg["rl"]["bc"] = {"enabled": False}
     report = train_ppo(cfg, max_updates=1)
     assert report["updates"] == 1
     payload = read_checkpoint(tmp_path / "run" / "last.pt", torch.device("cpu"))
-    assert payload["arch"] == ARCH == "polytrack-ppo-0.6.3"
-    assert payload["track"] == "summer1"
+    assert payload["arch"] == ARCH == "polytrack-specialist-0.6.3"
+    assert payload["track"] == "winter4"
     assert payload["n_actions"] == 9
     assert payload["obs_dim"] == obs_dim(9)

@@ -53,7 +53,10 @@ def _detectors(cfg: dict) -> dict[int, dict]:
     game = cfg.get("game") or {}
     parts = Path(game.get("parts") or Path(__file__).resolve().parents[1] / "sim" / "cache" / "track_parts.json")
     catalog = json.loads(parts.read_text(encoding="utf-8"))
-    return {int(item["id"]): item.get("detector") for item in catalog}
+    items = catalog.get("parts") if isinstance(catalog, dict) else catalog
+    if not isinstance(items, list):
+        raise ValueError(f"{parts} has no parts list")
+    return {int(item["id"]): item.get("detector") for item in items}
 
 
 def gate_points(parts: list, detectors: dict[int, dict]) -> tuple[list[tuple[float, float, float]], tuple[float, float, float]]:

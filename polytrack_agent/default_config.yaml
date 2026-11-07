@@ -1,11 +1,12 @@
-# PPO on the PolyTrack 0.6.3 fork build at polytrack-0.6.3.
-# POLYTRACK_ROOT is that directory. The car is polytrack_physics.wasm.
-# The policy reads numbers only: position, velocity, acceleration, distance to
-# the side of the road, and where the next gate is.
+# Specialist PPO on one PolyTrack 0.6.3 track.
+# POLYTRACK_ROOT is the fork directory. The car is polytrack_physics.wasm.
+# The policy reads velocity, heading, the road edge, and the next gate.
+# Training copies the fastest laps of the most common track in TrackData
+# before PPO. TRACKDATA overrides rl.bc.root.
 
 game:
   root: null             # overridden by POLYTRACK_ROOT or a --config overlay
-  track: tracks/official/summer1.track
+  track: tracks/official/winter4.track
   parts: null            # default is polytrack_agent/sim/cache/track_parts.json
 
 keys: [w, a, s, d]
@@ -44,11 +45,18 @@ rl:
   lr: 0.0003
   resume: true
   device: auto
-  out_dir: runs/ppo-progress
-  # stop_time: 25       # stop training once a lap finishes at or below this many seconds
+  out_dir: runs/winter4
+  # stop_time: 20.46    # otherwise the best cloned lap time
+  bc:
+    enabled: true
+    root: null           # TRACKDATA, else ~/dev/trackdata
+    margin_s: 0.5        # keep laps at or under the fastest time plus this
+    epochs: 5
+    batch_size: 256
+    lr: 0.001
 
 play:
-  checkpoint: runs/ppo-progress/best.pt
+  checkpoint: runs/winter4/best.pt
   device: auto
 
 reward:
