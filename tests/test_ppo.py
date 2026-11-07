@@ -415,8 +415,46 @@ def _respawn_env():
     cfg["rl"]["stuck_s"] = 1.0
     cfg["rl"]["timeout_s"] = 1e9
     cfg["rl"]["auto_respawn"] = True
+    cfg["rl"]["progress_stall_s"] = 0
     cfg["reward"]["respawn_penalty"] = 0.05
     return make_track(cfg, client=_StuckClient())
+
+
+def test_progress_stall_ends_a_lap_that_is_still_moving():
+    cfg = load_config(None)
+    cfg["rl"]["action_repeat"] = 50
+    cfg["rl"]["stuck_s"] = 1e9
+    cfg["rl"]["timeout_s"] = 1e9
+    cfg["rl"]["progress_stall_s"] = 0.2
+    env = make_track(cfg, client=_StuckClient())
+    try:
+        env.reset()
+        done = False
+        info = {}
+        for _ in range(20):
+            _frame, _reward, done, info = env.step(0)
+            if done:
+                break
+        assert done and info["stalled"] and not info["stuck"] and not info["timeout"]
+    finally:
+        env.close()
+
+
+def test_entropy_coef_keeps_an_explicit_zero():
+    from polytrack_agent.rl.trainer import entropy_coef_of
+
+    assert entropy_coef_of({}) == 0.01
+    assert entropy_coef_of({"entropy_coef": 0}) == 0.0
+    assert entropy_coef_of({"entropy_coef": 0.001}) == 0.001
+
+
+def test_entropy_bonus_moves_toward_the_target():
+    from polytrack_agent.rl.trainer import nudge_entropy_coef
+
+    assert nudge_entropy_coef(0.001, 0.35, 0.6) > 0.001
+    assert nudge_entropy_coef(0.001, 0.9, 0.6) < 0.001
+    assert nudge_entropy_coef(0.001, 0.6, 0.6) == 0.001
+    assert nudge_entropy_coef(0.02, 0.1, 0.6) <= 0.008
 
 
 def test_stuck_ends_the_episode_without_auto_respawn():
@@ -709,6 +747,160 @@ def test_passing_a_gate_pays_only_the_progress_change():
         assert info["state"]["nextCheckpointIndex"] == 1
         # The old reward added another +1 on this step, on top of the progress jump.
         assert second == pytest.approx(info["progress"] - before)
+    finally:
+        env.close()
+
+
+def _part(gx: int, gy: int, gz: int = 0) -> list[int]:
+    return [gx, gy, gz, 0, 0, 0, -1]
+
+
+class _HeightClient:
+    """One fixed height. Parts describe the road so the void line is real."""
+
+    def __init__(self, y: float, parts: list):
+        self.checkpoint_count = 1
+        self.parts = parts
+        self.frames = 0
+        self.y = float(y)
+        self.z = 0.0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.frames = int(frames)
+        return self._state()
+
+    def _state(self) -> dict:
+        return {
+            "frames": self.frames,
+            "speedKmh": 0.0,
+            "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 0,
+            "position": {"x": 0.0, "y": self.y, "z": self.z},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": [True, True, True, True],
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def test_dropping_onto_a_lower_road_is_not_a_fall():
+    # Spawn is 55 m. The landing grid is 45 m. The old line, 8 m under the
+    # spawn, is 47 m and ends the lap above that landing.
+    parts = [_part(0, 11), _part(1, 9), _part(2, 0)]
+    cfg = load_config(None)
+    cfg["rl"]["timeout_s"] = 1e9
+    cfg["rl"]["stuck_s"] = 1e9
+    env = make_track(cfg, client=_HeightClient(55.35, parts))
+    try:
+        env.reset()
+        assert env._void_y == pytest.approx(-8.0)
+        env.client.y = 46.0
+        _frame, _reward, done, info = env.step(forward_ids(env.keys)[0])
+        assert info["fell"] is False
+        assert done is False
+        env.client.y = -8.1
+        _frame, _reward, done, info = env.step(forward_ids(env.keys)[0])
+        assert info["fell"] is True
+        assert done is True
+    finally:
+        env.close()
+
+
+def test_falling_off_the_side_ends_the_lap():
+    # A low cell keeps the void under the floor. Over the high road, y=40 is
+    # still a lap. The same height far to the side is a drop into empty space.
+    parts = [_part(0, 11), _part(4, 0)]
+    cfg = load_config(None)
+    cfg["rl"]["timeout_s"] = 1e9
+    cfg["rl"]["stuck_s"] = 1e9
+    env = make_track(cfg, client=_HeightClient(55.0, parts))
+    try:
+        env.reset()
+        env.client.y = 40.0
+        _frame, _reward, done, info = env.step(forward_ids(env.keys)[0])
+        assert info["fell"] is False
+        assert done is False
+        env.client.y = 55.0
+        env.client.z = 0.0
+        env.reset()
+        env.client.y = 40.0
+        env.client.z = 20.0
+        _frame, _reward, done, info = env.step(forward_ids(env.keys)[0])
+        assert info["fell"] is True
+        assert done is True
+    finally:
+        env.close()
+
+
+class _JumpScoreClient:
+    """Drives toward the finish, with one step in the air in between."""
+
+    def __init__(self):
+        self.checkpoint_count = 1
+        # Road tiles under each sample, so the grounded steps are on the road
+        # and the airborne step is a jump rather than a trip onto the floor.
+        self.parts = [_part(gx, 11) for gx in (20, 12, 4, 2)]
+        self.frames = 0
+        self.steps = 0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        self.steps = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.frames = int(frames)
+        self.steps += 1
+        return self._state()
+
+    def _state(self) -> dict:
+        xs = {0: 100.0, 1: 60.0, 2: 20.0, 3: 10.0}
+        air = self.steps == 2
+        return {
+            "frames": self.frames,
+            "speedKmh": 36.0,
+            "velocity": {"x": -10.0, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 0,
+            "position": {"x": xs.get(self.steps, 10.0), "y": 55.0, "z": 0.0},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": [False, False, False, False] if air else [True, True, True, True],
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def test_air_progress_scores_only_when_the_wheels_return():
+    cfg = load_config(None)
+    cfg["rl"]["timeout_s"] = 1e9
+    cfg["rl"]["stuck_s"] = 1e9
+    cfg["reward"]["time_penalty"] = 0.0
+    env = make_track(cfg, client=_JumpScoreClient())
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        _frame, grounded, _done, info = env.step(forward)
+        assert info["wheels_down"] == 4
+        assert grounded == pytest.approx(info["progress"])
+        assert grounded > 0.0
+        held = info["progress"]
+        _frame, air, _done, info = env.step(forward)
+        assert info["wheels_down"] == 0
+        assert air == pytest.approx(0.0)
+        assert info["progress"] == pytest.approx(held)
+        _frame, landed, _done, info = env.step(forward)
+        assert info["wheels_down"] == 4
+        assert info["progress"] > held
+        assert landed == pytest.approx(info["progress"] - held)
     finally:
         env.close()
 

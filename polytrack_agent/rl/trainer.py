@@ -24,6 +24,32 @@ from polytrack_agent.rl.state import LapNumbers, obs_dim
 log = logging.getLogger(__name__)
 
 
+def entropy_coef_of(rl_cfg: dict) -> float:
+    """Read the entropy bonus. An explicit zero stays zero."""
+    raw = rl_cfg.get("entropy_coef")
+    if raw is None:
+        return 0.01
+    return float(raw)
+
+
+# A bonus of 0.01 flattened the copied buttons. Stay under that while the
+# logged entropy is being steered toward its target.
+_ENTROPY_COEF_CAP = 0.008
+
+
+def nudge_entropy_coef(coef: float, entropy: float, target: float) -> float:
+    """Move the bonus by at most 10% so the logged entropy heads toward `target`."""
+    target = float(target)
+    if target <= 0:
+        return float(coef)
+    gap = (target - float(entropy)) / target
+    gap = max(-1.0, min(1.0, gap))
+    updated = float(coef) * (1.0 + 0.1 * gap)
+    if updated < 0:
+        return 0.0
+    return min(_ENTROPY_COEF_CAP, updated)
+
+
 def _meta(model: StateActorCritic, keys: list[str], track: str) -> dict:
     return {
         "obs_dim": int(model.obs_dim),
@@ -201,6 +227,10 @@ def train_ppo(
     gamma = float(rl_cfg.get("gamma") or 0.99)
     lam = float(rl_cfg.get("lam") or 0.95)
     value_coef = float(rl_cfg.get("value_coef") or 0.5)
+    entropy_coef = entropy_coef_of(rl_cfg)
+    target_entropy = rl_cfg.get("target_entropy")
+    if target_entropy is not None:
+        log.info("Entropy target %.3f, bonus starts at %.5f", float(target_entropy), entropy_coef)
     meta = _meta(model, env.keys, track)
     log_path = out_dir / "log.csv"
     best_progress = -1.0
@@ -261,7 +291,7 @@ def train_ppo(
         log.info("Passed the gate. Wrote %s (%s steps).", path, len(episode_trace))
 
     def flush() -> None:
-        nonlocal updates, best_progress, current_return, current_length
+        nonlocal updates, best_progress, current_return, current_length, entropy_coef
         lengths = list(episode_lengths)
         returns_ep = list(episode_returns)
         if current_length > 0:
@@ -284,15 +314,17 @@ def train_ppo(
             epochs=int(rl_cfg.get("epochs") or 4),
             minibatch_size=int(rl_cfg.get("minibatch_size") or 64),
             clip=float(rl_cfg.get("clip") or 0.2),
-            entropy_coef=float(rl_cfg.get("entropy_coef") or 0.01),
+            entropy_coef=entropy_coef,
             value_coef=value_coef,
             unimix=unimix,
         )
+        if target_entropy is not None:
+            entropy_coef = nudge_entropy_coef(entropy_coef, stats["entropy"], float(target_entropy))
         mean_progress = float(np.mean(stored_progress)) if stored_progress else 0.0
         mean_return = float(np.mean(returns_ep))
         updates += 1
         log.info(
-            "update %s  laps %s  return %.3f  progress %.3f  policy %.4f  value %.4f  entropy %.3f",
+            "update %s  laps %s  return %.3f  progress %.3f  policy %.4f  value %.4f  entropy %.3f  coef %.5f",
             updates,
             len(returns_ep),
             mean_return,
@@ -300,6 +332,7 @@ def train_ppo(
             stats["policy"],
             stats["value"],
             stats["entropy"],
+            entropy_coef,
         )
         payload = {**meta, "update": updates, "progress": mean_progress}
         save_checkpoint(out_dir / "last.pt", model, payload)

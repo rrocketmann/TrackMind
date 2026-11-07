@@ -27,6 +27,7 @@ rl:
                          # (see TROUBLESHOOTING, "the learner does not find the
                          # good action").
   stuck_s: 8
+  progress_stall_s: 3  # end the lap when the score has not risen for this many seconds. 0 disables it.
   timeout_s: 90
   reset_action: false    # add a 10th action that holds reset (respawn at checkpoint)
   auto_respawn: false    # on stuck, respawn at the last checkpoint instead of ending
@@ -37,26 +38,28 @@ rl:
   gamma: 0.99
   lam: 0.95
   value_coef: 0.5
-  entropy_coef: 0.01
+  entropy_coef: 0.001  # 0.01 flattened the copied buttons toward a coin flip
+  target_entropy: 0.6  # nudge the bonus until the logged entropy sits here
   unimix: 0.01
   group_size: 4          # laps collected before one PPO update
   hidden: 128
   lr: 0.0003
   resume: true
   device: auto
-  out_dir: runs/ppo-progress
+  out_dir: runs/ppo-ground
   # stop_time: 25       # stop training once a lap finishes at or below this many seconds
 
 play:
-  checkpoint: runs/ppo-progress/best.pt
+  checkpoint: runs/ppo-ground/best.pt
   device: auto
 
 reward:
-  # The score is the change in progress. A gate and the finish are already
-  # inside that number, so they do not get a second bonus. There is no per-step
-  # time tax; discounting is what prefers getting further sooner.
+  # The score is the change in progress while a wheel is on the road. In the
+  # air it stays still, so flying toward the next gate pays nothing. A gate
+  # and the finish are already inside that number. Each decision also costs a
+  # little, so rolling down the ramp loses to a jump that lands sooner.
   progress_scale: 1.0
-  time_penalty: 0.0
+  time_penalty: 0.002
   finish_bonus: 0.0
   respawn_penalty: 0.0    # subtracted each time the car respawns at a checkpoint
   contact_reward: 0.0     # paid each step per wheel on the track surface, scaled by ground covered

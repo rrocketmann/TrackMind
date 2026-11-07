@@ -25,6 +25,9 @@ _PART_QUAT = (
 )
 _PART_SIZE = 5.0
 _ROAD_HALF = 2.5  # one grid cell. Summer 1's road is one cell wide.
+_FALL_MARGIN = 8.0  # metres of drop that still count as a lap.
+_OFF_TRACK = 5.0  # metres past the road edge. Past this, a drop is a fall.
+_SURFACE_SLACK = 4.0  # metres below a road-cell top that still count as that road.
 
 
 def _rotate(quat: tuple[float, float, float, float], vector: list[float]) -> tuple[float, float, float]:
@@ -74,6 +77,36 @@ def gate_points(parts: list, detectors: dict[int, dict]) -> tuple[list[tuple[flo
     gates = [_mean(buckets[order]) for order in sorted(buckets)]
     finish = _mean(finishes) if finishes else (gates[-1] if gates else (0.0, 0.0, 0.0))
     return gates, finish
+
+
+def road_void_y(parts: list) -> float | None:
+    """Y of a fall into empty space, or None when the track has no parts.
+
+    Each cell's road is its highest part. The line sits `_FALL_MARGIN` metres
+    under the lowest of those. Summer 1 starts at 55 m and lands at 45 m, so a
+    line 8 m under the spawn ends the lap above the road the car is meant to
+    reach. Anchoring the line to the lowest road keeps that drop alive.
+    """
+    tops: dict[tuple[int, int], int] = {}
+    for raw in parts:
+        key = (int(raw[0]), int(raw[2]))
+        height = int(raw[1])
+        if key not in tops or height > tops[key]:
+            tops[key] = height
+    if not tops:
+        return None
+    return min(tops.values()) * _PART_SIZE - _FALL_MARGIN
+
+
+def road_tops(parts: list) -> dict[tuple[float, float], float]:
+    """Highest part on each grid cell. That top is the road; pillars sit under it."""
+    tops: dict[tuple[float, float], float] = {}
+    for raw in parts:
+        key = (int(raw[0]) * _PART_SIZE, int(raw[2]) * _PART_SIZE)
+        height = int(raw[1]) * _PART_SIZE
+        if key not in tops or height > tops[key]:
+            tops[key] = height
+    return tops
 
 
 def road_cells(parts: list) -> list[tuple[float, float]]:
@@ -170,6 +203,8 @@ class SchoolagyTrack:
         self.repeat = max(1, int(cfg["rl"].get("action_repeat") or 50))
         self.timeout_s = float(cfg["rl"].get("timeout_s") or 90)
         self.stuck_s = float(cfg["rl"].get("stuck_s") or 8)
+        # 0 keeps the old rule: a moving car runs until it falls, sticks, or times out.
+        self.progress_stall_s = float(cfg["rl"].get("progress_stall_s") or 0)
         self.reset_action = bool(cfg["rl"].get("reset_action", False))
         self.auto_respawn = bool(cfg["rl"].get("auto_respawn", False))
         self.airborne_grace_s = float(cfg["rl"].get("airborne_grace_s") or 0.5)
@@ -189,12 +224,17 @@ class SchoolagyTrack:
         self._checkpoint = 0
         self._span = 1.0
         self._slow = 0.0
+        self._stall = 0.0
+        self._progress_mark = 0.0
         self._airborne_s = 0.0
         self._last_xy = (0.0, 0.0)
         self._beached = False
         self._respawns = 0
+        self._last_road_y = 0.0
         self.gates, self.finish = gate_points(self.client.parts, _detectors(cfg))
         self._road = road_cells(self.client.parts)
+        self._tops = road_tops(self.client.parts)
+        self._void_y = road_void_y(self.client.parts)
 
     def _point(self, index: int) -> tuple[float, float, float]:
         if 0 <= index < len(self.gates):
@@ -272,9 +312,12 @@ class SchoolagyTrack:
         self._checkpoint = int(state["nextCheckpointIndex"])
         self._span = max(self._distance(state, self._checkpoint), 1.0)
         self._slow = 0.0
+        self._stall = 0.0
+        self._progress_mark = 0.0
         self._airborne_s = 0.0
         self._last_xy = (float(state["position"]["x"]), float(state["position"]["z"]))
         self._beached = False
+        self._last_road_y = self._origin_y
         return {
             "state": state,
             "progress": 0.0,
@@ -290,18 +333,32 @@ class SchoolagyTrack:
         state = self._view(self.client.step(_controls(action_id, self.keys, self.reset_action), target))
         dt = max(0.0, (int(state["frames"]) - int(before["frames"])) * 0.001)
         finished = state["finishFrames"] is not None
-        progress = self._progress_of(state, finished)
+        # Wheel contact alone is not "on the road": the floor beside the track
+        # holds the car up too. Part origins leave gaps, so the side clearance
+        # also reads negative on the real racing line. A wheel counts when the
+        # car is near the height of the nearest road cell.
+        down = self._wheels_down(state)
+        clearance = float((state.get("border") or {}).get("clearance") or 0.0)
+        position = state["position"]
+        y = float(position["y"])
+        on_road = down > 0 and self._on_surface(float(position["x"]), y, float(position["z"]))
+        if on_road:
+            self._last_road_y = y
+        geometric = self._progress_of(state, finished)
         # Progress already moves when a gate is passed and when the lap finishes.
         # An extra bonus on those events made the first gate worth more than
         # the rest of the lap, so the critic had nothing left to score.
-        reward = (progress - self._progress) * self.progress_scale - self.time_penalty
-        self._progress = progress
+        # Off the road the score stays put. Flying closer to the next gate, or
+        # driving on the floor, used to outscore landing on the road. The
+        # catch-up is paid on the step the wheels are back on the road.
+        if on_road or finished:
+            reward = (geometric - self._progress) * self.progress_scale - self.time_penalty
+            self._progress = geometric
+        else:
+            reward = -self.time_penalty
+        progress = self._progress
         if finished:
             reward += self.finish_bonus
-        # Wheel contact is the authoritative "is the car on the track" signal. A
-        # car that leaves the road lands on its chassis with every wheel in the
-        # air and cannot be driven again, so staying on the surface has to pay.
-        down = self._wheels_down(state)
         moved = self._moved(state)
         # A fixed distance threshold misfires at small `action_repeat`: a car at
         # 28 km/h covers only ~0.08 units in a 10-frame step, so it looked parked.
@@ -333,15 +390,32 @@ class SchoolagyTrack:
         # Ground motion, not the speed field, drives the stuck timer: a beached
         # car can still report tens of km/h while it cannot move.
         self._slow = 0.0 if (not creeping and ground > 3.0) or int(state["frames"]) < 2000 else self._slow + dt
+        # A car can keep rolling after the score has stopped. That used to fill
+        # the rest of the 90s clock with zero-score steps.
+        if self._progress > self._progress_mark + 1e-4:
+            self._progress_mark = self._progress
+            self._stall = 0.0
+        else:
+            self._stall += dt
+        stalled = (
+            self.progress_stall_s > 0.0
+            and not finished
+            and self._stall >= self.progress_stall_s
+        )
         # Sitting on the road without going anywhere must cost, or the policy
         # learns that the safest way to never leave the road is to never drive.
         if down > 0 and moved < floor and not finished:
             reward += self.stall_penalty
-        fell = float(state["position"]["y"]) < self._origin_y - 8.0
+        # Over the road, a downhill section stays alive. Off to the side, the
+        # same drop is a fall. The void line still catches a car that misses
+        # every road and keeps going down.
+        fell = self._fell(y) or (
+            clearance < -_OFF_TRACK and y < self._last_road_y - _FALL_MARGIN
+        )
         timed_out = int(state["frames"]) * 0.001 >= self.timeout_s
         stuck = self._slow >= self.stuck_s
         respawned = False
-        if (stuck or beached) and self.auto_respawn and not finished:
+        if (stuck or beached) and self.auto_respawn and not finished and not stalled:
             # The car is wedged. Hold reset for one decision so the worker
             # teleports it back to the last checkpoint, then keep the episode
             # alive. Ending here taught the policy nothing about recovering.
@@ -353,6 +427,7 @@ class SchoolagyTrack:
             progress = self._progress_of(state, finished)
             reward += self.respawn_penalty
             self._slow = 0.0
+            self._stall = 0.0
             self._airborne_s = 0.0
             self._beached = False
             self._moved(state)
@@ -360,7 +435,7 @@ class SchoolagyTrack:
             respawned = True
             stuck = False
             beached = False
-        done = finished or fell or timed_out or ((stuck or beached) and not self.auto_respawn)
+        done = finished or fell or timed_out or stalled or ((stuck or beached) and not self.auto_respawn)
         self._state = state
         info = {
             "state": state,
@@ -370,6 +445,7 @@ class SchoolagyTrack:
             "finished": finished,
             "restarted": False,
             "stuck": stuck,
+            "stalled": stalled,
             "beached": beached,
             "fell": fell,
             "wheels_down": down,
@@ -381,6 +457,26 @@ class SchoolagyTrack:
             "ground_speed": ground,
         }
         return None, float(reward), done, info
+
+    def _on_surface(self, x: float, y: float, z: float) -> bool:
+        """True when `y` is at the height of the nearest road cell.
+
+        No parts means a fake client. Those tests have no floor to cheat on.
+        """
+        if not self._tops:
+            return True
+        nearest = min(self._tops, key=lambda cell: (cell[0] - x) ** 2 + (cell[1] - z) ** 2)
+        return y > self._tops[nearest] - _SURFACE_SLACK
+
+    def _fell(self, y: float) -> bool:
+        """True once the car has dropped into empty space under the track.
+
+        A track with parts uses the line under its lowest road. A fake client
+        with no parts keeps the older line, 8 m under the spawn.
+        """
+        if self._void_y is not None:
+            return y < self._void_y
+        return y < self._origin_y - _FALL_MARGIN
 
     def _reset_id(self) -> int:
         """The action id whose mask holds `reset`, or 0 when it is disabled."""

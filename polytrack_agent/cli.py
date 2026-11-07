@@ -56,6 +56,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.set_defaults(func=cmd_train)
 
+    bc = sub.add_parser(
+        "bc",
+        parents=[common],
+        help="Clone Summer 1 holds from a TrackData checkout, numbers only",
+    )
+    bc.add_argument("--data", type=Path, default=Path("data/TrackData"))
+    bc.add_argument("--out", type=Path, default=Path("runs/bc"))
+    bc.add_argument("--track", default="Summer 1", help="campaign name in laps/index.jsonl")
+    bc.add_argument("--epochs", type=int, default=40)
+    bc.add_argument("--patience", type=int, default=5)
+    bc.add_argument("--seed", type=int, default=None)
+    bc.set_defaults(func=cmd_bc)
+
     search = sub.add_parser(
         "search",
         parents=[common],
@@ -84,6 +97,28 @@ def _trainer(algo: str):
 
         return train_sac
     raise ValueError(f"algo must be ppo or sac, got {algo}")
+
+
+def cmd_bc(cfg: dict, args) -> int:
+    from polytrack_agent.rl.bc import train_bc
+
+    seed = cfg["rl"].get("seed")
+    if args.seed is not None:
+        seed = args.seed
+    if seed is None:
+        seed = 0
+    train_bc(
+        Path(args.data),
+        Path(args.out),
+        track_name=str(args.track),
+        track_stem=Path(cfg["game"]["track"]).stem,
+        keys=list(cfg["keys"]),
+        hidden=int(cfg["rl"].get("hidden") or 128),
+        seed=int(seed),
+        epochs=int(args.epochs),
+        patience=int(args.patience),
+    )
+    return 0
 
 
 def cmd_train(cfg: dict, args) -> int:
