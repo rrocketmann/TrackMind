@@ -65,3 +65,35 @@ PPO. The actor and the critic do not share weights. The critic is trained on the
 This is not a claim that the lap will finish. The earlier PPO runs stalled near progress 0.20. It is the learner whose score is the reward we actually wrote down.
 
 `python scripts/train.py` writes `runs/ppo-reward`. It will not load `runs/summer1` or `runs/sac`. `--algo sac` is still there. Do not treat another 60-update sweep of the old setup as a new question.
+
+## Closed-loop PPO, stopped 7 Nov 2026
+
+No lap has finished. The third gate and the finish are still ahead.
+
+The run that was stopped is `runs/ppo-bc`. It copied the human buttons in `runs/bc/best.pt`, then learned by driving. That copy is the PPO actor, 28 numbers in, 9 buttons out. Training ran on 7 Nov 2026 from 07:20 to 20:17 UTC. The weights were kept across two restarts. The update counter went back to 1 each time, so the diagrams are in time order, not in update-number order.
+
+The score is the change in progress while a wheel is on the road. In the air the score stays still. A gate is already inside that number. There is no extra gate bonus. From 19:06 UTC each decision also costs 0.002, which is 0.04 per second.
+
+| piece | when | updates | what it was | last end score | last lap average | last entropy |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 07:20–18:58 | 15,787 | copied buttons, then PPO | 2.51 | 1.72 | 0.58 |
+| 2 | 18:58–19:06 | 166 | same weights, entropy bonus nudged toward 0.6 | 2.17 | 1.47 | 0.43 |
+| 3 | 19:06–20:17 | 1,340 | each decision costs 0.002 | 1.64 | 1.64 | 0.38 |
+
+End score is the mean of four laps. Progress 1 is the first gate, 2 is the second, 3 is the third, and 4 is the finish. The lap average stays near 1.6 even when a lap ends past the second gate, because the car spends the start of the lap below 2.
+
+In the first piece the end score first passed 2 at update 4,693 and first passed 2.5 at update 7,636. The highest end score was 2.53 at update 14,019. Of the 8,152 updates from there to the end of that piece, 7,557 were still at or past the second gate, and 10 fell back under 1.2. The last 100 updates of that piece averaged end score 2.38 and lap average 1.63. Entropy stayed near 0.4–0.6. It did not wash out toward a coin flip. A fully random policy over nine buttons has entropy 2.20.
+
+The clock cost is why the logged end score drops to about 1.6 and then sits there. The lap average does not drop. Over the last 100 updates it was 1.59, the same place as before the charge. A 20 second lap pays about 0.8 in time, so the same drive past the second gate logs near 1.6 instead of near 2.4. No update in that last piece has an end score of 2 or more. That is the charge, not a lost gate.
+
+`runs/ppo-bc/best.pt` is update 11,796 from the first piece, lap average 2.10. That is the highest lap average, not the last brain. `runs/ppo-bc/last.pt` is the brain at the stop: update 1,340 of the third piece, lap average 1.64. Both are arch `polytrack-ppo-0.6.3`, Summer 1, keys w a s d.
+
+A chase lap of that last brain, a few updates before the stop: 6 of 10 laps reached the second gate and then stopped. 3 fell at the first gate. 1 stuck before the second gate. The saved lap hops the downhill after the first gate and is still near 100 km/h on the lower road. It reaches the second gate at about 11 seconds, going about 11 km/h, and stops. The flag stays at 2/3.
+
+The earlier run, `runs/ppo-closed`, used a larger entropy bonus. Entropy climbed from about 0.5 to about 1.8, and the copied driving washed out. Its first piece, 1,473 updates, never reached an end score of 2. After a restart that kept the weights, 8 updates did. The best of those is update 997, end score 2.07, lap average 1.93, saved as `runs/ppo-closed/best.pt`. `runs/ppo-closed/last.pt` is update 1,148, lap average 1.74. No lap finished there either.
+
+![End score, lap average, and entropy for both runs](runs/training-so-far.png)
+
+![The clock charge lowers the logged end score and leaves the lap average where it was](runs/ppo-bc/clock-cost.png)
+
+The thick line is a 40-update average. The faint line is every update. Dashed lines are restarts. The logs are `runs/ppo-bc/log.csv` and `runs/ppo-closed/log.csv`.
