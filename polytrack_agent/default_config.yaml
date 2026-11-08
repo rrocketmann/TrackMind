@@ -38,7 +38,12 @@ rl:
   gamma: 0.99
   lam: 0.95
   value_coef: 0.5
-  entropy_coef: 0.01
+  entropy_coef: 0         # sharpness is the schedule below, not a bonus inside PPO
+  entropy:
+    bump: 0.5             # one lift, applied on the first update of a run
+    drop: 0.003           # subtracted from the entropy target every update
+    wobble: 0.04          # PPO may leave entropy this far from the target
+    floor: 0.08
   unimix: 0.01
   group_size: 4          # laps collected before one PPO update
   hidden: 128

@@ -18,7 +18,7 @@ from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint, save_checkpoint
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.model import StateActorCritic
-from polytrack_agent.rl.ppo import ppo_update
+from polytrack_agent.rl.ppo import clear_policy_moments, hold_entropy, ppo_update, set_entropy
 from polytrack_agent.rl.seed import set_seed
 from polytrack_agent.rl.state import LapNumbers, obs_dim
 
@@ -86,27 +86,30 @@ def _checkpoint_matches(path: Path, track: str, chords: int, width: int, hidden:
     )
 
 
-def _resume(path: Path, model: StateActorCritic, device: torch.device, track: str) -> bool:
+def _resume(path: Path, model: StateActorCritic, device: torch.device, track: str) -> tuple[int, float | None] | None:
     if not path.is_file():
-        return False
+        return None
     payload = read_checkpoint(path, device)
     if payload.get("track") != track:
         log.warning("Ignoring %s because it was trained on %s.", path, payload.get("track"))
-        return False
+        return None
     if payload.get("arch") != ARCH or int(payload.get("n_actions") or -1) != model.n_actions:
         log.warning("Ignoring %s because it is a different actor.", path)
-        return False
+        return None
     if int(payload.get("obs_dim") or -1) != model.obs_dim or int(payload.get("hidden") or -1) != model.hidden:
         log.warning("Ignoring %s because the observation layout changed.", path)
-        return False
+        return None
     try:
         model.load_state_dict(payload["state_dict"])
     except RuntimeError as exc:
         log.warning("Ignoring %s (%s).", path, exc)
-        return False
+        return None
     model.eval()
-    log.info("Resumed %s from update %s", path, payload.get("update"))
-    return True
+    update = int(payload.get("update") or 0)
+    raw_target = payload.get("entropy_target")
+    target = None if raw_target is None else float(raw_target)
+    log.info("Resumed %s from update %s", path, update)
+    return update, target
 
 
 def _begin(env: SchoolagyTrack, numbers: LapNumbers) -> None:
@@ -235,7 +238,15 @@ def train_ppo(
         env = make_track(cfg)
     chords = n_actions(env.keys, reset_action=getattr(env, "reset_action", False))
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
-    resumed = bool(rl_cfg.get("resume", True)) and _resume(out_dir / "last.pt", model, device, track)
+    resumed_pair = _resume(out_dir / "last.pt", model, device, track) if bool(rl_cfg.get("resume", True)) else None
+    resumed = resumed_pair is not None
+    resumed_update = None if resumed_pair is None else resumed_pair[0]
+    entropy_target = None if resumed_pair is None else resumed_pair[1]
+    entropy_cfg = dict(rl_cfg.get("entropy") or {})
+    entropy_bump = float(0.5 if entropy_cfg.get("bump") is None else entropy_cfg.get("bump"))
+    entropy_drop = float(0.003 if entropy_cfg.get("drop") is None else entropy_cfg.get("drop"))
+    entropy_floor = float(0.08 if entropy_cfg.get("floor") is None else entropy_cfg.get("floor"))
+    entropy_wobble = float(0.04 if entropy_cfg.get("wobble") is None else entropy_cfg.get("wobble"))
     if resumed:
         demos = None
     elif demos is not None:
@@ -290,8 +301,29 @@ def train_ppo(
 
     numbers = LapNumbers(chords)
     rows: list[dict] = []
+    episode_log = out_dir / "episodes.csv"
+    episode_index = 0
+
+    def write_episode(seconds: float, progress: float, finished: bool, episode_return: float, steps: int) -> None:
+        nonlocal episode_index
+        episode_index += 1
+        record = {
+            "episode": episode_index,
+            "seconds": round(float(seconds), 3),
+            "progress": round(float(progress), 4),
+            "finished": int(bool(finished)),
+            "return": round(float(episode_return), 4),
+            "steps": int(steps),
+        }
+        fresh_episode = not episode_log.is_file()
+        with episode_log.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(record.keys()))
+            if fresh_episode:
+                writer.writeheader()
+            writer.writerow(record)
+
     _begin(env, numbers)
-    updates = 0
+    updates = 0 if resumed_update is None else int(resumed_update)
     stored_obs: list[np.ndarray] = []
     stored_actions: list[int] = []
     stored_logp: list[float] = []
@@ -325,7 +357,7 @@ def train_ppo(
         log.info("Passed the gate. Wrote %s (%s steps).", path, len(episode_trace))
 
     def flush() -> None:
-        nonlocal updates, best_progress, current_return, current_length
+        nonlocal updates, best_progress, current_return, current_length, entropy_target
         lengths = list(episode_lengths)
         returns_ep = list(episode_returns)
         if current_length > 0:
@@ -348,10 +380,36 @@ def train_ppo(
             epochs=int(rl_cfg.get("epochs") or 4),
             minibatch_size=int(rl_cfg.get("minibatch_size") or 64),
             clip=float(rl_cfg.get("clip") or 0.2),
-            entropy_coef=float(rl_cfg.get("entropy_coef") or 0.01),
+            entropy_coef=float(0 if rl_cfg.get("entropy_coef") is None else rl_cfg.get("entropy_coef")),
             value_coef=value_coef,
             unimix=unimix,
         )
+        measured = float(stats["entropy"])
+        if entropy_target is None:
+            entropy_target = measured + entropy_bump
+            log.info(
+                "Entropy bump from %.3f to %.3f, then down %.4f each update, wobbling by %.3f.",
+                measured,
+                entropy_target,
+                entropy_drop,
+                entropy_wobble,
+            )
+            stats["entropy"] = set_entropy(model, observations, unimix, entropy_target)
+            clear_policy_moments(optimizer, model)
+        else:
+            entropy_target = max(entropy_floor, entropy_target - entropy_drop)
+            held = hold_entropy(
+                model,
+                observations,
+                unimix,
+                measured,
+                entropy_target,
+                entropy_wobble,
+                entropy_floor,
+            )
+            if abs(held - measured) > 1e-6:
+                clear_policy_moments(optimizer, model)
+            stats["entropy"] = held
         mean_progress = float(np.mean(stored_progress)) if stored_progress else 0.0
         mean_return = float(np.mean(returns_ep))
         updates += 1
@@ -365,7 +423,7 @@ def train_ppo(
             stats["value"],
             stats["entropy"],
         )
-        payload = {**meta, "update": updates, "progress": mean_progress}
+        payload = {**meta, "update": updates, "progress": mean_progress, "entropy_target": float(entropy_target)}
         save_checkpoint(out_dir / "last.pt", model, payload)
         if mean_progress > best_progress:
             best_progress = mean_progress
@@ -430,6 +488,20 @@ def train_ppo(
             if done:
                 episode_returns.append(current_return)
                 episode_lengths.append(current_length)
+                finished = bool(info.get("finished"))
+                state = info["state"]
+                seconds = (
+                    int(state["finishFrames"]) * 0.001
+                    if finished
+                    else int(state["frames"]) * 0.001
+                )
+                write_episode(
+                    seconds,
+                    float(info.get("progress") or 0.0),
+                    finished,
+                    current_return,
+                    current_length,
+                )
                 current_return = 0.0
                 current_length = 0
                 if info.get("finished"):

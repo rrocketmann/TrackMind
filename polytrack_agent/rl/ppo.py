@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from polytrack_agent.rl.model import mix_logits
+from polytrack_agent.rl.model import StateActorCritic, mix_logits
 
 
 def ppo_loss(
@@ -82,4 +84,82 @@ def ppo_update(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
     model.eval()
+    with torch.no_grad():
+        last_stats["entropy"] = _entropy(model, tokens, unimix)
     return last_stats
+
+
+def _entropy(model: StateActorCritic, observations: torch.Tensor, unimix: float) -> float:
+    logits, _values = model(observations)
+    return float(Categorical(logits=mix_logits(logits, unimix)).entropy().mean())
+
+
+def set_entropy(
+    model: StateActorCritic,
+    observations: torch.Tensor,
+    unimix: float,
+    target: float,
+) -> float:
+    """Scale the policy logits so the mean entropy lands on `target`.
+
+    Multiplying every logit by the same positive number keeps the action order
+    and only changes how sure the policy is. A smaller scale is a higher entropy.
+    """
+    ceiling = math.log(int(model.n_actions)) - 1e-4
+    goal = min(float(target), ceiling)
+    base_weight = model.policy.weight.detach().clone()
+    base_bias = model.policy.bias.detach().clone()
+
+    def at(scale: float) -> float:
+        model.policy.weight.copy_(base_weight * scale)
+        model.policy.bias.copy_(base_bias * scale)
+        return _entropy(model, observations, unimix)
+
+    with torch.no_grad():
+        # `soft` stays on the high-entropy side of the goal, `sharp` on the low side.
+        soft = 1e-3
+        sharp = 1.0
+        if at(sharp) > goal:
+            for _ in range(16):
+                sharp *= 2.0
+                if at(sharp) <= goal:
+                    break
+        elif at(soft) < goal:
+            return at(soft)
+        for _ in range(24):
+            mid = (soft + sharp) / 2.0
+            if at(mid) > goal:
+                soft = mid
+            else:
+                sharp = mid
+        return at(sharp)
+
+
+def hold_entropy(
+    model: StateActorCritic,
+    observations: torch.Tensor,
+    unimix: float,
+    measured: float,
+    target: float,
+    band: float,
+    floor: float,
+) -> float:
+    """Leave entropy alone inside a band around the schedule. Outside it, move to the edge."""
+    width = abs(float(band))
+    low = max(float(floor), float(target) - width)
+    high = float(target) + width
+    if low <= float(measured) <= high:
+        return float(measured)
+    edge = low if float(measured) < low else high
+    return set_entropy(model, observations, unimix, edge)
+
+
+def clear_policy_moments(optimizer: torch.optim.Optimizer, model: StateActorCritic) -> None:
+    """Drop Adam's memory of the policy head after its logits are rescaled."""
+    for param in (model.policy.weight, model.policy.bias):
+        state = optimizer.state.get(param)
+        if not state:
+            continue
+        for value in state.values():
+            if torch.is_tensor(value):
+                value.zero_()

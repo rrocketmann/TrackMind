@@ -276,6 +276,39 @@ def test_observation_is_car_state_plus_previous_action():
     assert float(vector[FEATURES + 1 :].sum()) == 0.0
 
 
+def test_entropy_can_be_raised_and_then_lowered():
+    from polytrack_agent.rl.ppo import set_entropy
+
+    model = StateActorCritic(8, 9, hidden=16)
+    with torch.no_grad():
+        model.policy.bias.zero_()
+        model.policy.bias[0] = 5.0
+    observations = torch.zeros(16, 8)
+    raised = set_entropy(model, observations, 0.0, 1.2)
+    lowered = set_entropy(model, observations, 0.0, raised - 0.2)
+    assert raised == pytest.approx(1.2, abs=0.03)
+    assert lowered == pytest.approx(raised - 0.2, abs=0.03)
+
+
+def test_entropy_wobble_keeps_a_near_miss_and_catches_a_far_one():
+    from polytrack_agent.rl.ppo import hold_entropy
+
+    model = StateActorCritic(8, 9, hidden=16)
+    observations = torch.zeros(16, 8)
+    with torch.no_grad():
+        model.policy.bias.zero_()
+        model.policy.bias[0] = 2.0
+    bias = model.policy.bias.detach().clone()
+    near = hold_entropy(model, observations, 0.0, 0.90, 0.92, 0.04, 0.08)
+    assert near == pytest.approx(0.90)
+    assert torch.equal(model.policy.bias, bias)
+    with torch.no_grad():
+        model.policy.bias.zero_()
+        model.policy.bias[0] = 8.0
+    caught = hold_entropy(model, observations, 0.0, 0.05, 0.90, 0.04, 0.08)
+    assert caught == pytest.approx(0.86, abs=0.03)
+
+
 def test_ppo_loss_is_finite():
     logits = torch.zeros(4, 9)
     values = torch.zeros(4)
