@@ -588,14 +588,19 @@ def train_ppo(
         )
         measured = float(stats["entropy"])
         if not critic_ready or entropy_target is None:
-            entropy_target = measured + entropy_bump
-            log.info(
-                "Entropy bump from %.3f to %.3f, then down %.4f each update, wobbling by %.3f.",
-                measured,
-                entropy_target,
-                entropy_drop,
-                entropy_wobble,
-            )
+            if entropy_drop == 0:
+                raw_target = entropy_cfg.get("target")
+                entropy_target = 0.6 if raw_target is None else float(raw_target)
+                log.info("Entropy held at %.3f, wobble %.3f.", float(entropy_target), entropy_wobble)
+            else:
+                entropy_target = measured + entropy_bump
+                log.info(
+                    "Entropy bump from %.3f to %.3f, then down %.4f each update, wobbling by %.3f.",
+                    measured,
+                    entropy_target,
+                    entropy_drop,
+                    entropy_wobble,
+                )
             stats["entropy"] = set_entropy(model, observations, unimix, entropy_target)
             clear_policy_moments(optimizer, model)
             critic_ready = True

@@ -43,7 +43,8 @@ rl:
   value_coef: 0.5
   entropy_coef: 0         # sharpness is the schedule below, not a bonus inside PPO
   entropy:
-    bump: 0.5             # one lift, applied on the first update of a run
+    target: 0.6           # held here when drop is 0, including a fresh run
+    bump: 0.5             # one lift on the first update, only when drop is above 0
     drop: 0               # the target stays put
     wobble: 0.04          # PPO may leave entropy this far from the target
     floor: 0.08
