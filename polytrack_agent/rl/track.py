@@ -24,7 +24,28 @@ _PART_QUAT = (
     ((-0.7071067811865477, 0.0, 0.0, 0.7071067811865475), (-0.5, -0.5, 0.5, 0.5), (0.0, -0.7071067811865475, 0.7071067811865477, 0.0), (0.5, -0.5, 0.5, -0.5)),
 )
 _PART_SIZE = 5.0
-_ROAD_HALF = 2.5  # one grid cell. Summer 1's road is one cell wide.
+_ROAD_HALF = 2.5  # one grid cell. A wide road is several of these side by side.
+
+# Pillars, walls, signs, and loose blocks share the track grid but are not road.
+_NOT_ROAD = frozenset(
+    {
+        19, 20, 21, 22, 23, 24,
+        26, 27, 28, 29,
+        30, 31, 32,
+        40,
+        45, 46, 47, 48,
+        49, 50, 51,
+        53, 54,
+        58, 59, 61, 62, 63, 64,
+        66,
+        79, 80, 81,
+        84,
+        99, 100,
+        *range(101, 117),
+        119, 120, 121, 122, 123, 124, 125, 126,
+        134, 135,
+    }
+)
 
 
 def _rotate(quat: tuple[float, float, float, float], vector: list[float]) -> tuple[float, float, float]:
@@ -80,10 +101,16 @@ def gate_points(parts: list, detectors: dict[int, dict]) -> tuple[list[tuple[flo
 
 
 def road_cells(parts: list) -> list[tuple[float, float]]:
-    """Unique road-tile centers on the ground plane. Pillars share a cell with the surface."""
+    """Unique drivable-tile centers on the ground plane.
+
+    Pillars, walls, and signs are not road. A pillar under a road piece shares
+    that piece's cell and is dropped when the road cell is already recorded.
+    """
     seen: set[tuple[float, float]] = set()
     cells: list[tuple[float, float]] = []
     for raw in parts:
+        if int(raw[3]) in _NOT_ROAD:
+            continue
         cell = (int(raw[0]) * _PART_SIZE, int(raw[2]) * _PART_SIZE)
         if cell in seen:
             continue
@@ -92,35 +119,108 @@ def road_cells(parts: list) -> list[tuple[float, float]]:
     return cells
 
 
-def road_border(cells: list[tuple[float, float]], x: float, z: float) -> tuple[float, float]:
-    """Meters of road left beside the car, and meters to the right of the tile center.
+class _Road:
+    """Grid index of road cells. Border queries stay off the per-step scan."""
 
-    The road is the chain of 5 m tiles. Clearance is measured to the side of that
-    chain, so the joint between two tiles still counts as the middle of the road.
-    Off the road, clearance is negative.
-    """
-    if not cells:
-        return 0.0, 0.0
-    nearest = min(cells, key=lambda cell: (cell[0] - x) ** 2 + (cell[1] - z) ** 2)
-    neighbor = None
-    neighbor_distance = 1e9
-    for cell in cells:
-        distance = math.hypot(cell[0] - nearest[0], cell[1] - nearest[1])
-        if 3.0 < distance < 8.0 and distance < neighbor_distance:
-            neighbor = cell
-            neighbor_distance = distance
-    offset_x = x - nearest[0]
-    offset_z = z - nearest[1]
-    if neighbor is None:
-        clearance = _ROAD_HALF - max(abs(offset_x), abs(offset_z))
-        return clearance, 0.0
-    along_x = neighbor[0] - nearest[0]
-    along_z = neighbor[1] - nearest[1]
-    length = math.hypot(along_x, along_z)
-    along_x /= length
-    along_z /= length
-    side = offset_x * -along_z + offset_z * along_x
-    return _ROAD_HALF - abs(side), side
+    def __init__(self, cells: list[tuple[float, float]]):
+        self._at: dict[tuple[int, int], tuple[float, float]] = {}
+        for x, z in cells:
+            self._at[(int(round(x / _PART_SIZE)), int(round(z / _PART_SIZE)))] = (float(x), float(z))
+        self._along: dict[tuple[int, int], tuple[float, float]] = {
+            key: self._along_of(key) for key in self._at
+        }
+
+    def _neighbors(self, key: tuple[int, int]) -> list[tuple[int, int]]:
+        ix, iz = key
+        return [
+            nxt
+            for nxt in ((ix + 1, iz), (ix - 1, iz), (ix, iz + 1), (ix, iz - 1))
+            if nxt in self._at
+        ]
+
+    def _along_of(self, key: tuple[int, int]) -> tuple[float, float]:
+        """Track direction: the pair of neighbors that most nearly face each other."""
+        neighbors = self._neighbors(key)
+        if not neighbors:
+            return (1.0, 0.0)
+        x, z = self._at[key]
+        dirs: list[tuple[float, float]] = []
+        for nxt in neighbors:
+            nx, nz = self._at[nxt]
+            dx, dz = nx - x, nz - z
+            length = math.hypot(dx, dz) or 1.0
+            dirs.append((dx / length, dz / length))
+        best = 0
+        best_dot = 1.0
+        for i, left in enumerate(dirs):
+            for right in dirs[i + 1 :]:
+                dot = left[0] * right[0] + left[1] * right[1]
+                if dot < best_dot:
+                    best_dot = dot
+                    best = i
+        return dirs[best]
+
+    def border(self, x: float, z: float) -> tuple[float, float]:
+        """Meters of road left to the nearest edge, and meters to the right of the tile center.
+
+        The along-track axis is the road chain, so the joint between two tiles
+        still counts as the middle. A second tile beside the first extends the
+        clearance instead of being treated as the track direction. Off the road,
+        clearance is negative.
+        """
+        if not self._at:
+            return 0.0, 0.0
+        ix = int(round(x / _PART_SIZE))
+        iz = int(round(z / _PART_SIZE))
+        nearest = None
+        best = 1e18
+        for dx in range(-4, 5):
+            for dz in range(-4, 5):
+                key = (ix + dx, iz + dz)
+                pos = self._at.get(key)
+                if pos is None:
+                    continue
+                dist = (pos[0] - x) ** 2 + (pos[1] - z) ** 2
+                if dist < best:
+                    best = dist
+                    nearest = key
+        if nearest is None:
+            for key, pos in self._at.items():
+                dist = (pos[0] - x) ** 2 + (pos[1] - z) ** 2
+                if dist < best:
+                    best = dist
+                    nearest = key
+        if nearest is None:
+            return 0.0, 0.0
+        nx, nz = self._at[nearest]
+        along_x, along_z = self._along[nearest]
+        side = (x - nx) * -along_z + (z - nz) * along_x
+        extra = 0.0
+        if abs(side) > 1e-6:
+            sign = 1.0 if side > 0.0 else -1.0
+            step_x = -along_z * sign
+            step_z = along_x * sign
+            cx, cz = nx, nz
+            for _ in range(4):
+                cx += step_x * _PART_SIZE
+                cz += step_z * _PART_SIZE
+                if (int(round(cx / _PART_SIZE)), int(round(cz / _PART_SIZE))) not in self._at:
+                    break
+                extra += _PART_SIZE
+        return _ROAD_HALF - abs(side) + extra, side
+
+
+def road_border(cells: list[tuple[float, float]], x: float, z: float) -> tuple[float, float]:
+    """Meters of road left beside the car, and meters to the right of the tile center."""
+    return _Road(cells).border(x, z)
+
+
+def _number(mapping: dict, key: str, default: float) -> float:
+    """Config float. An explicit 0 stays 0."""
+    value = mapping.get(key) if isinstance(mapping, dict) else None
+    if value is None:
+        return float(default)
+    return float(value)
 
 
 def game_root(cfg: dict) -> Path:
@@ -177,27 +277,34 @@ class SchoolagyTrack:
         self.auto_respawn = bool(cfg["rl"].get("auto_respawn", False))
         self.airborne_grace_s = float(cfg["rl"].get("airborne_grace_s") or 0.5)
         reward = cfg["reward"]
-        self.progress_scale = float(reward.get("progress_scale") or 1)
-        self.time_penalty = float(reward.get("time_penalty") or 0)
-        self.finish_bonus = float(reward.get("finish_bonus") or 0)
-        self.respawn_penalty = float(reward.get("respawn_penalty") or 0)
-        self.contact_reward = float(reward.get("contact_reward") or 0)
-        self.beach_penalty = float(reward.get("beach_penalty") or 0)
-        self.stall_penalty = float(reward.get("stall_penalty") or 0)
-        self.speed_reward = float(reward.get("speed_reward") or 0)
-        self.speed_cap_kmh = float(reward.get("speed_cap_kmh") or 120)
+        self.progress_scale = _number(reward, "progress_scale", 1.0)
+        self.time_penalty = _number(reward, "time_penalty", 0.0)
+        self.finish_bonus = _number(reward, "finish_bonus", 0.0)
+        self.respawn_penalty = _number(reward, "respawn_penalty", 0.0)
+        self.contact_reward = _number(reward, "contact_reward", 0.0)
+        self.beach_penalty = _number(reward, "beach_penalty", 0.0)
+        self.stall_penalty = _number(reward, "stall_penalty", 0.0)
+        self.speed_reward = _number(reward, "speed_reward", 0.0)
+        self.speed_cap_kmh = _number(reward, "speed_cap_kmh", 120.0)
+        self.speed_drop_penalty = _number(reward, "speed_drop_penalty", 0.0)
+        self.speed_drop_margin = _number(reward, "speed_drop_margin", 0.0)
+        self.fail_penalty = _number(reward, "fail_penalty", 0.0)
+        self.offtrack_penalty = _number(reward, "offtrack_penalty", 0.0)
         self._state: dict = {}
         self._origin_y = 0.0
+        self._origin_xz = (0.0, 0.0)
         self._progress = 0.0
+        self._mark = 0.0
+        self._flat = 0.0
         self._checkpoint = 0
-        self._span = 1.0
         self._slow = 0.0
         self._airborne_s = 0.0
         self._last_xy = (0.0, 0.0)
+        self._pace = 0.0
         self._beached = False
         self._respawns = 0
         self.gates, self.finish = gate_points(self.client.parts, _detectors(cfg))
-        self._road = road_cells(self.client.parts)
+        self._road = _Road(road_cells(self.client.parts))
 
     def _point(self, index: int) -> tuple[float, float, float]:
         if 0 <= index < len(self.gates):
@@ -210,8 +317,7 @@ class SchoolagyTrack:
         point = self._point(int(viewed["nextCheckpointIndex"]))
         viewed["target"] = {"x": point[0], "y": point[1], "z": point[2]}
         position = viewed.get("position") or {}
-        clearance, side = road_border(
-            self._road,
+        clearance, side = self._road.border(
             float(position.get("x") or 0.0),
             float(position.get("z") or 0.0),
         )
@@ -243,27 +349,70 @@ class SchoolagyTrack:
         while pinned against a wall still reads as moving. The velocity vector is
         the honest one when the worker supplies it.
         """
-        velocity = state.get("velocity") or {}
-        vx = float(velocity.get("x") or 0.0)
-        vz = float(velocity.get("z") or 0.0)
-        if vx != 0.0 or vz != 0.0:
-            return math.hypot(vx, vz) * 3.6
+        velocity = state.get("velocity")
+        if isinstance(velocity, dict):
+            # A stopped chassis is (0, 0). Falling through to speedKmh here made
+            # a car spinning its wheels against a wall look like it was moving.
+            return math.hypot(float(velocity.get("x") or 0.0), float(velocity.get("z") or 0.0)) * 3.6
         return float(state["speedKmh"])
 
-    def _progress_of(self, state: dict, finished: bool) -> float:
-        """Checkpoint index plus how much of the way to that gate is done.
+    def _motion_kmh(self, state: dict) -> tuple[float, float]:
+        """Chassis speed, and speed toward the next gate, both in km/h.
 
-        Closing the distance raises it. Driving away lowers it. Passing the
-        gate advances the index. That change is the whole score for the gate.
+        Both come from the velocity vector. Wheel spin does not count. Toward
+        the gate is positive. With no chord to follow, the chassis speed is used
+        for both.
+        """
+        velocity = state.get("velocity")
+        if not isinstance(velocity, dict):
+            return 0.0, 0.0
+        vx = float(velocity.get("x") or 0.0)
+        vz = float(velocity.get("z") or 0.0)
+        ground = math.hypot(vx, vz) * 3.6
+        index = int(state["nextCheckpointIndex"])
+        prev, nxt = self._chord(index)
+        dx = nxt[0] - prev[0]
+        dz = nxt[1] - prev[1]
+        length2 = dx * dx + dz * dz
+        if length2 < 1.0:
+            return ground, ground
+        along = (vx * dx + vz * dz) / math.sqrt(length2) * 3.6
+        return ground, along
+
+    def _chord(self, index: int) -> tuple[tuple[float, float], tuple[float, float]]:
+        """The ground segment from the previous gate (or the spawn) to this gate."""
+        if index <= 0:
+            prev = self._origin_xz
+        else:
+            point = self._point(index - 1)
+            prev = (point[0], point[2])
+        point = self._point(index)
+        return prev, (point[0], point[2])
+
+    def _progress_of(self, state: dict, finished: bool) -> float:
+        """Checkpoint index plus the fraction of the chord to that gate.
+
+        The fraction is the projection onto the segment, clamped to the segment.
+        Reaching the gate is 1. Crossing it advances the index and starts the
+        next segment at 0, so the crossing pays whatever was still unpaid and
+        nothing twice. Driving back along the chord lowers it.
         """
         if finished:
             return float(self.client.checkpoint_count) + 1.0
         index = int(state["nextCheckpointIndex"])
-        distance = self._distance(state, index)
-        if index != self._checkpoint or self._span <= 0.0:
-            self._checkpoint = index
-            self._span = max(distance, 1.0)
-        covered = min(0.99, max(0.0, 1.0 - distance / self._span))
+        position = state["position"]
+        x = float(position["x"])
+        z = float(position["z"])
+        prev, nxt = self._chord(index)
+        dx = nxt[0] - prev[0]
+        dz = nxt[1] - prev[1]
+        length2 = dx * dx + dz * dz
+        if length2 < 1.0:
+            covered = 1.0
+        else:
+            covered = ((x - prev[0]) * dx + (z - prev[1]) * dz) / length2
+            covered = min(1.0, max(0.0, covered))
+        self._checkpoint = index
         return float(index) + covered
 
     def reset(self, restart: bool = True) -> dict:
@@ -271,12 +420,15 @@ class SchoolagyTrack:
         state = self._view(self.client.reset())
         self._state = state
         self._origin_y = float(state["position"]["y"])
+        self._origin_xz = (float(state["position"]["x"]), float(state["position"]["z"]))
         self._progress = 0.0
+        self._mark = 0.0
+        self._flat = 0.0
         self._checkpoint = int(state["nextCheckpointIndex"])
-        self._span = max(self._distance(state, self._checkpoint), 1.0)
         self._slow = 0.0
         self._airborne_s = 0.0
         self._last_xy = (float(state["position"]["x"]), float(state["position"]["z"]))
+        self._pace = 0.0
         self._beached = False
         return {
             "state": state,
@@ -294,13 +446,33 @@ class SchoolagyTrack:
         dt = max(0.0, (int(state["frames"]) - int(before["frames"])) * 0.001)
         finished = state["finishFrames"] is not None
         progress = self._progress_of(state, finished)
-        # Progress already moves when a gate is passed and when the lap finishes.
-        # An extra bonus on those events made the first gate worth more than
-        # the rest of the lap, so the critic had nothing left to score.
-        reward = (progress - self._progress) * self.progress_scale - self.time_penalty
+        # The score is the change in progress along the chord to the next gate.
+        # Time is charged per second, so a finer action repeat cannot farm it
+        # and a 90 s wander is not free.
+        reward = (progress - self._progress) * self.progress_scale - self.time_penalty * dt
         self._progress = progress
+        # Forward travel along the chord is the score above. Speed toward the
+        # next gate pays on top of that. A sudden loss of chassis speed is a hit.
+        ground_kmh, along_kmh = self._motion_kmh(state)
+        cap = max(1.0, self.speed_cap_kmh)
+        reward += self.speed_reward * min(cap, max(-cap, along_kmh)) / cap
+        allowed = self.speed_drop_margin * dt
+        lost = self._pace - ground_kmh
+        if lost > allowed:
+            reward -= self.speed_drop_penalty * (lost - allowed) / cap
+        self._pace = ground_kmh
+        # Speed with no chord progress is a stuck car. The first two seconds
+        # are the launch, so that timer waits until the car has had a chance to move.
+        if progress >= self._mark + 0.05:
+            self._mark = progress
+            self._flat = 0.0
+        elif int(state["frames"]) >= 2000:
+            self._flat += dt
         if finished:
             reward += self.finish_bonus
+        clearance = (state.get("border") or {}).get("clearance")
+        if clearance is not None and float(clearance) < 0.0:
+            reward -= self.offtrack_penalty * dt
         # Wheel contact is the authoritative "is the car on the track" signal. A
         # car that leaves the road lands on its chassis with every wheel in the
         # air and cannot be driven again, so staying on the surface has to pay.
@@ -317,14 +489,6 @@ class SchoolagyTrack:
             # grid and farm the reward instead of driving.
             reward += self.contact_reward * (down / 4.0) * min(moved, 4.0)
         ground = self._ground_speed(state)
-        if self.speed_reward and down > 0 and not finished:
-            # The game's cars are steered by a slip-cancelling assist that only
-            # works with the front wheels down and real speed on. A car crawling
-            # at walking pace has almost no automatic steering, so paying for
-            # speed while on the road pushes the policy into the regime where
-            # the car steers itself. Capped so flat-out is not blindly optimal,
-            # and gated on contact so a beached car cannot collect it.
-            reward += self.speed_reward * (down / 4.0) * min(ground, self.speed_cap_kmh) / max(1.0, self.speed_cap_kmh)
         # Beached: no wheel touches anything for longer than a bump, and the car
         # is not actually moving. This is a dead end, and is scored as one.
         beached = down == 0 and self._airborne_s >= self.airborne_grace_s and moved < floor
@@ -342,7 +506,7 @@ class SchoolagyTrack:
             reward += self.stall_penalty
         fell = float(state["position"]["y"]) < self._origin_y - 8.0
         timed_out = int(state["frames"]) * 0.001 >= self.timeout_s
-        stuck = self._slow >= self.stuck_s
+        stuck = self._slow >= self.stuck_s or self._flat >= self.stuck_s
         respawned = False
         if (stuck or beached) and self.auto_respawn and not finished:
             # The car is wedged. Hold reset for one decision so the worker
@@ -354,6 +518,12 @@ class SchoolagyTrack:
             )
             dt += max(0.0, (int(state["frames"]) - int(first["frames"])) * 0.001)
             progress = self._progress_of(state, finished)
+            # The teleport is not driving. Keep the score at the new place
+            # without adding that jump to the reward.
+            self._progress = progress
+            self._mark = progress
+            self._flat = 0.0
+            self._pace = self._motion_kmh(state)[0]
             reward += self.respawn_penalty
             self._slow = 0.0
             self._airborne_s = 0.0
@@ -364,6 +534,8 @@ class SchoolagyTrack:
             stuck = False
             beached = False
         done = finished or fell or timed_out or ((stuck or beached) and not self.auto_respawn)
+        if done and not finished:
+            reward -= self.fail_penalty
         self._state = state
         info = {
             "state": state,

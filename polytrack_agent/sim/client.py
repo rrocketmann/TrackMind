@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -68,6 +69,23 @@ class SimClient:
         self._send({"cmd": "step", "controls": controls, "target": int(frames)})
         message = self._expect("state")
         return message["state"]
+
+    def pin(self, cpu: int) -> None:
+        """Keep every thread of this process on one logical CPU.
+
+        A hyperthread sibling shares the core, so two physics processes there
+        do not step any faster.
+        """
+        mask = {int(cpu)}
+        os.sched_setaffinity(self._proc.pid, mask)
+        tasks = Path(f"/proc/{self._proc.pid}/task")
+        if not tasks.is_dir():
+            return
+        for task in tasks.iterdir():
+            try:
+                os.sched_setaffinity(int(task.name), mask)
+            except (OSError, ValueError):
+                continue
 
     def close(self) -> None:
         if self._proc.poll() is not None:

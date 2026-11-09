@@ -35,7 +35,7 @@ rl:
   epochs: 4
   minibatch_size: 256
   clip: 0.2
-  gamma: 0.99
+  gamma: 0.998            # per decision. At 50 ms that is about a 25 s horizon.
   lam: 0.95
   value_coef: 0.5
   entropy_coef: 0         # sharpness is the schedule below, not a bonus inside PPO
@@ -46,6 +46,7 @@ rl:
     floor: 0.08
   unimix: 0.01
   group_size: 4          # laps collected before one PPO update
+  workers: null          # null: one physics process per performance core, each pinned to its own core
   hidden: 128
   lr: 0.0003
   resume: true
@@ -65,15 +66,18 @@ play:
   device: auto
 
 reward:
-  # The score is the change in progress. A gate and the finish are already
-  # inside that number, so they do not get a second bonus. There is no per-step
-  # time tax; discounting is what prefers getting further sooner.
-  progress_scale: 1.0
-  time_penalty: 0.0
+  # The score is forward travel along the chord to the next gate, plus speed
+  # toward that gate. Any forward motion counts. A sudden loss of speed is a hit.
+  progress_scale: 1.0     # forward chord progress pays this much per gate; backward costs it
+  speed_reward: 0.05      # per decision at speed_cap, signed by speed toward the next gate
+  speed_cap_kmh: 120      # above this the speed reward stops growing
+  speed_drop_penalty: 1.0 # times the extra speed lost in one decision, as a fraction of speed_cap
+  speed_drop_margin: 1500 # km/h per second that is still a normal change (about 75 km/h in 50 ms)
+  time_penalty: 0.0       # per second of the decision
   finish_bonus: 0.0
   respawn_penalty: 0.0    # subtracted each time the car respawns at a checkpoint
   contact_reward: 0.0     # paid each step per wheel on the track surface, scaled by ground covered
   beach_penalty: 0.0      # charged once when every wheel leaves the ground and the car stalls
-  stall_penalty: 0.0      # charged each step the car sits on the road without covering ground
-  speed_reward: 0.0       # paid each step for ground speed while the wheels are down
-  speed_cap_kmh: 120      # above this the speed reward stops growing
+  stall_penalty: 0.0      # added each step the car sits on the road without covering ground
+  fail_penalty: 0.0       # subtracted once on a fall, stall, beach, or timeout
+  offtrack_penalty: 0.0   # per second while the car is past the road edge

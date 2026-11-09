@@ -85,34 +85,93 @@ function patchWorker(source) {
                         hasStarted: r.hasStarted(),`,
     ],
     [
-      "                function c() {\n                    const e = performance.now()\n                      , t = [];\n                    if (n.length > 0) {",
       `                function c() {
-                    // The offscreen worker only flushes control samples in its
-                    // realtime loop. This loop does not, so copy the latest
-                    // sample that is already due onto the live controls. Leave
-                    // a future sample queued. Applying it early holds the first
-                    // button of the race and ignores every later command.
-                    if (n.length > 0) {
-                      for (const e of n) if (null != e.userControls && e.userControls.length > 0) {
-                        const frame = e.model.getTime().numberOfFrames;
-                        let latest = null;
-                        let cursor = 0;
-                        for (const sample of e.userControls) {
-                            if (sample.frame > frame) break;
-                            latest = sample;
-                            cursor += 1;
-                        }
-                        if (latest != null) {
-                          e.userControls.splice(0, cursor);
-                          const on = e.model.controls;
-                          on.up = latest.up, on.right = latest.right, on.down = latest.down,
-                          on.left = latest.left, on.reset = latest.reset;
-                        }
-                      }
-                    }
                     const e = performance.now()
                       , t = [];
-                    if (n.length > 0) {`,
+                    if (n.length > 0) {
+                        let i;
+                        do {
+                            i = !0;
+                            for (let e = 0; e < Math.max(1, Math.ceil(100 / n.length)); e++) {
+                                for (const e of n)
+                                    if (e.model.hasStarted()) {
+                                        if (null == e.targetSimulationTime)
+                                            throw new Error("Non-realtime simulation requires targetSimulationTime");
+                                        e.model.getTime().numberOfFrames < Sh.maxFrames && e.model.getTime().lessThan(e.targetSimulationTime) && !e.isPaused && (t.push(a(e)),
+                                        i = !1)
+                                    }
+                                if (i)
+                                    break
+                            }
+                        } while (Math.max(0, performance.now() - e) / 1e3 < .01 && !i)
+                    }
+                    postMessage({
+                        messageType: X_.UpdateResult,
+                        carStates: t
+                    })
+                }`,
+      `                function readCar(car) {
+                    const model = car.model;
+                    const position = model.getPosition();
+                    const quaternion = model.getQuaternion();
+                    const velocity = model.getVelocity ? model.getVelocity() : null;
+                    const finish = model.getFinishTime();
+                    return {
+                        id: car.id,
+                        frames: model.getTime().numberOfFrames,
+                        speedKmh: model.getSpeedKmh(),
+                        velocity: velocity ? { x: velocity.x, y: velocity.y, z: velocity.z } : null,
+                        hasStarted: model.hasStarted(),
+                        finishFrames: finish ? finish.numberOfFrames : null,
+                        nextCheckpointIndex: model.getNextCheckpointIndex(),
+                        position: { x: position.x, y: position.y, z: position.z },
+                        quaternion: { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w },
+                        wheelContact: [0, 1, 2, 3].map((index) => !!model.getWheelInContact(index)),
+                    };
+                }
+                function c() {
+                    // Step the physics only. The stock loop builds a full car
+                    // state, including every wheel, on every 1 ms frame and
+                    // stops after 10 ms of wall clock. The learner reads one
+                    // state per decision, so the frames in between only step.
+                    const states = [];
+                    for (const car of n) {
+                        if (car.userControls && car.userControls.length > 0) {
+                            const frame = car.model.getTime().numberOfFrames;
+                            let latest = null;
+                            let cursor = 0;
+                            for (const sample of car.userControls) {
+                                if (sample.frame > frame) break;
+                                latest = sample;
+                                cursor += 1;
+                            }
+                            if (latest != null) {
+                                car.userControls.splice(0, cursor);
+                                const on = car.model.controls;
+                                on.up = latest.up;
+                                on.right = latest.right;
+                                on.down = latest.down;
+                                on.left = latest.left;
+                                on.reset = latest.reset;
+                            }
+                        }
+                        if (!car.model.hasStarted() || car.isPaused) continue;
+                        if (car.targetSimulationTime == null) {
+                            throw new Error("Non-realtime simulation requires targetSimulationTime");
+                        }
+                        const limit = Sh.maxFrames;
+                        while (true) {
+                            const time = car.model.getTime();
+                            if (!(time.numberOfFrames < limit && time.lessThan(car.targetSimulationTime))) break;
+                            car.model.step();
+                        }
+                        states.push(readCar(car));
+                    }
+                    postMessage({
+                        messageType: X_.UpdateResult,
+                        carStates: states
+                    });
+                }`,
     ],
     [
       "                                    const n = Math.max(0, t - s);\n                                    let i = r.model.getTime().numberOfFrames + n;\n                                    if (r.model.hasStarted() || (i = 0),\n                                    0 == r.userControls.length)",

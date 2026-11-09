@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -180,9 +182,78 @@ def summarize_trials(reports: list[dict]) -> dict:
     }
 
 
+def _rank_core_cpus(rows: list[tuple[int, int, int]]) -> list[tuple[int, int]]:
+    """`(core, cpu, max_khz)` rows. One cpu per core, highest clock first.
+
+    The second logical cpu of a core is a hyperthread and is dropped.
+    """
+    found: dict[int, tuple[int, int]] = {}
+    for core, cpu, freq in rows:
+        core_id = int(core)
+        previous = found.get(core_id)
+        if previous is None or int(cpu) < previous[1]:
+            found[core_id] = (int(freq), int(cpu))
+    return sorted(found.values(), key=lambda item: (-item[0], item[1]))
+
+
+def _fast_cpus(ranked: list[tuple[int, int]]) -> list[int]:
+    """Cpus tied for the highest clock. Empty when the machine could not be read."""
+    if not ranked:
+        return []
+    top = ranked[0][0]
+    return [cpu for freq, cpu in ranked if freq == top]
+
+
+def _read_core_cpus() -> list[tuple[int, int]]:
+    rows: list[tuple[int, int, int]] = []
+    for cpu in range(os.cpu_count() or 1):
+        topo = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/core_id")
+        freq_path = Path(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/cpuinfo_max_freq")
+        try:
+            core = int(topo.read_text())
+        except OSError:
+            continue
+        try:
+            freq = int(freq_path.read_text())
+        except OSError:
+            freq = 0
+        rows.append((core, cpu, freq))
+    return _rank_core_cpus(rows)
+
+
+def _worker_count(raw: object, group_size: int, fast: list[int]) -> int:
+    """How many physics processes to boot.
+
+    A missing value is one process per performance core, and never more than
+    the lap group. An explicit number is used as given, at least one.
+    """
+    if raw is None:
+        return max(1, min(int(group_size), len(fast) or 1))
+    return max(1, int(raw))
+
+
+def _pin_physics(envs: list[SchoolagyTrack], ranked: list[tuple[int, int]]) -> list[int]:
+    """Pin each owned process to its own core, fastest cores first."""
+    cpus = [cpu for _freq, cpu in ranked]
+    if not cpus:
+        return []
+    pinned: list[int] = []
+    for index, env in enumerate(envs):
+        pin = getattr(getattr(env, "client", None), "pin", None)
+        if pin is None:
+            continue
+        cpu = cpus[index] if index < len(cpus) else cpus[index % len(cpus)]
+        try:
+            pin(cpu)
+        except OSError:
+            break
+        pinned.append(cpu)
+    return pinned
+
+
 def train_ppo(
     cfg: dict,
-    env: SchoolagyTrack | None = None,
+    env: SchoolagyTrack | list[SchoolagyTrack] | tuple[SchoolagyTrack, ...] | None = None,
     max_updates: int | None = None,
 ) -> dict:
     """Update the actor and the reward critic on one 0.6.3 track.
@@ -191,6 +262,8 @@ def train_ppo(
     a checkpoint resumes, it first clones the fastest TrackData laps of the
     most common track. The critic is trained on the discounted return of the
     environment reward. A checkpoint resumes only when its track matches.
+    Several cars step at once, one physics process each. A lap stays on its
+    own car until it ends, and only then joins the update.
     """
     rl_cfg = cfg["rl"]
     seed = rl_cfg.get("seed")
@@ -233,9 +306,16 @@ def train_ppo(
         )
     track = Path(cfg["game"]["track"]).stem
     log.info("PPO device %s (%s) track %s seed %s", device, hardware, track, "unset" if seed is None else int(seed))
-    own_env = env is None
-    if env is None:
-        env = make_track(cfg)
+    passed_envs = list(env) if isinstance(env, (list, tuple)) else None
+    if passed_envs is not None:
+        if not passed_envs:
+            raise ValueError("train_ppo needs an environment")
+        env = passed_envs[0]
+        own_env = False
+    else:
+        own_env = env is None
+        if env is None:
+            env = make_track(cfg)
     chords = n_actions(env.keys, reset_action=getattr(env, "reset_action", False))
     model = StateActorCritic(obs_dim=obs_dim(chords), n_actions=chords, hidden=hidden).to(device)
     resumed_pair = _resume(out_dir / "last.pt", model, device, track) if bool(rl_cfg.get("resume", True)) else None
@@ -277,6 +357,7 @@ def train_ppo(
     meta = _meta(model, env.keys, track)
     log_path = out_dir / "log.csv"
     best_progress = -1.0
+    best_seconds: float | None = None
     best_path = out_dir / "best.pt"
     if best_path.is_file():
         try:
@@ -287,9 +368,13 @@ def train_ppo(
                 and int(saved.get("n_actions") or -1) == model.n_actions
             )
             if same_actor:
-                best_progress = float(saved.get("progress") or -1.0)
+                raw_progress = saved.get("progress")
+                best_progress = -1.0 if raw_progress is None else float(raw_progress)
+                raw_seconds = saved.get("finished_seconds")
+                best_seconds = None if raw_seconds is None else float(raw_seconds)
         except (OSError, KeyError, ValueError, TypeError):
             best_progress = -1.0
+            best_seconds = None
     stop_progress = rl_cfg.get("stop_progress")
     stop_at = None if stop_progress is None else float(stop_progress)
     stop_time = rl_cfg.get("stop_time")
@@ -299,7 +384,37 @@ def train_ppo(
     if stop_time_s is not None:
         log.info("Stopping once a lap finishes at or below %.3fs.", stop_time_s)
 
-    numbers = LapNumbers(chords)
+    class _Car:
+        """One physics process and the lap it is driving. Steps stay here until the lap ends."""
+
+        def __init__(self, one: SchoolagyTrack):
+            self.env = one
+            self.numbers = LapNumbers(chords)
+            self.obs: list[np.ndarray] = []
+            self.actions: list[int] = []
+            self.logp: list[float] = []
+            self.values: list[float] = []
+            self.rewards: list[float] = []
+            self.dones: list[float] = []
+            self.progress: list[float] = []
+            self.ret = 0.0
+            self.length = 0
+            self.trace: list[dict] = []
+            self.passed_at: int | None = None
+
+        def clear(self) -> None:
+            self.obs.clear()
+            self.actions.clear()
+            self.logp.clear()
+            self.values.clear()
+            self.rewards.clear()
+            self.dones.clear()
+            self.progress.clear()
+            self.ret = 0.0
+            self.length = 0
+            self.trace.clear()
+            self.passed_at = None
+
     rows: list[dict] = []
     episode_log = out_dir / "episodes.csv"
     episode_index = 0
@@ -322,7 +437,6 @@ def train_ppo(
                 writer.writeheader()
             writer.writerow(record)
 
-    _begin(env, numbers)
     updates = 0 if resumed_update is None else int(resumed_update)
     stored_obs: list[np.ndarray] = []
     stored_actions: list[int] = []
@@ -333,36 +447,54 @@ def train_ppo(
     stored_progress: list[float] = []
     episode_returns: list[float] = []
     episode_lengths: list[int] = []
+    episode_ends: list[tuple[float, float | None]] = []
+    # Flush only sees finished laps. A car still driving keeps its steps, so this
+    # stays zero and the update does not invent a partial episode.
     current_return = 0.0
     current_length = 0
-    episode_trace: list[dict] = []
-    passed_at: int | None = None
     best_lap: float | None = None
     spawn_chord: str | None = None
     spawn_probs: dict[str, float] = {}
 
-    def save_pass(progress: float) -> None:
-        gates = [list(point) for point in getattr(env, "gates", ())]
-        finish = list(getattr(env, "finish", (0.0, 0.0, 0.0)))
+    def save_pass(progress: float, car: _Car) -> None:
+        one = car.env
+        gates = [list(point) for point in getattr(one, "gates", ())]
+        finish = list(getattr(one, "finish", (0.0, 0.0, 0.0)))
         payload = {
             "track": track,
             "progress": progress,
             "gates": gates,
             "finish": finish,
-            "parts": getattr(env.client, "parts", []),
-            "steps": episode_trace,
+            "parts": getattr(one.client, "parts", []),
+            "steps": car.trace,
         }
         path = out_dir / "pass.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
-        log.info("Passed the gate. Wrote %s (%s steps).", path, len(episode_trace))
+        log.info("Passed the gate. Wrote %s (%s steps).", path, len(payload["steps"]))
+
+    # A resumed critic has already seen returns. A fresh run fits the critic
+    # once before the cloned actor takes a policy step.
+    critic_ready = resumed
+
+    def _better(progress: float, seconds: float | None) -> bool:
+        if seconds is not None and best_seconds is None:
+            return True
+        if seconds is not None and best_seconds is not None:
+            return seconds < best_seconds
+        if seconds is None and best_seconds is None:
+            return progress > best_progress
+        return False
 
     def flush() -> None:
-        nonlocal updates, best_progress, current_return, current_length, entropy_target
+        nonlocal updates, best_progress, best_seconds, current_return, current_length, entropy_target, critic_ready
         lengths = list(episode_lengths)
         returns_ep = list(episode_returns)
+        ends = list(episode_ends)
         if current_length > 0:
             lengths.append(current_length)
             returns_ep.append(current_return)
+            if stored_progress:
+                ends.append((float(stored_progress[-1]), None))
             current_return = 0.0
             current_length = 0
         if sum(lengths) < 2:
@@ -383,9 +515,10 @@ def train_ppo(
             entropy_coef=float(0 if rl_cfg.get("entropy_coef") is None else rl_cfg.get("entropy_coef")),
             value_coef=value_coef,
             unimix=unimix,
+            update_policy=critic_ready,
         )
         measured = float(stats["entropy"])
-        if entropy_target is None:
+        if not critic_ready or entropy_target is None:
             entropy_target = measured + entropy_bump
             log.info(
                 "Entropy bump from %.3f to %.3f, then down %.4f each update, wobbling by %.3f.",
@@ -396,6 +529,7 @@ def train_ppo(
             )
             stats["entropy"] = set_entropy(model, observations, unimix, entropy_target)
             clear_policy_moments(optimizer, model)
+            critic_ready = True
         else:
             entropy_target = max(entropy_floor, entropy_target - entropy_drop)
             held = hold_entropy(
@@ -407,10 +541,22 @@ def train_ppo(
                 entropy_wobble,
                 entropy_floor,
             )
-            if abs(held - measured) > 1e-6:
+            scale = float(getattr(hold_entropy, "scale", 1.0))
+            if scale < 0.5 or scale > 2.0:
                 clear_policy_moments(optimizer, model)
             stats["entropy"] = held
-        mean_progress = float(np.mean(stored_progress)) if stored_progress else 0.0
+        if ends:
+            mean_progress = float(np.mean([item[0] for item in ends]))
+            finishes = [item for item in ends if item[1] is not None]
+            if finishes:
+                candidate, candidate_seconds = min(finishes, key=lambda item: float(item[1]))
+            else:
+                candidate = float(max(item[0] for item in ends))
+                candidate_seconds = None
+        else:
+            mean_progress = 0.0
+            candidate = 0.0
+            candidate_seconds = None
         mean_return = float(np.mean(returns_ep))
         updates += 1
         log.info(
@@ -423,10 +569,13 @@ def train_ppo(
             stats["value"],
             stats["entropy"],
         )
-        payload = {**meta, "update": updates, "progress": mean_progress, "entropy_target": float(entropy_target)}
+        payload = {**meta, "update": updates, "progress": float(candidate), "entropy_target": float(entropy_target)}
+        if candidate_seconds is not None:
+            payload["finished_seconds"] = float(candidate_seconds)
         save_checkpoint(out_dir / "last.pt", model, payload)
-        if mean_progress > best_progress:
-            best_progress = mean_progress
+        if _better(float(candidate), None if candidate_seconds is None else float(candidate_seconds)):
+            best_progress = float(candidate)
+            best_seconds = None if candidate_seconds is None else float(candidate_seconds)
             save_checkpoint(best_path, model, payload)
         row = {"update": updates, **stats, "progress": mean_progress, "return": mean_return}
         rows.append(row)
@@ -445,66 +594,132 @@ def train_ppo(
         stored_progress.clear()
         episode_returns.clear()
         episode_lengths.clear()
+        episode_ends.clear()
+
+    envs = list(passed_envs) if passed_envs is not None else [env]
+    pool: ThreadPoolExecutor | None = None
+
+    def step_car(job: tuple[_Car, int]):
+        one, action_id = job
+        return one.env.step(action_id)
+
+    def begin_car(one: _Car) -> None:
+        _begin(one.env, one.numbers)
 
     try:
+        # Own the extra processes only when this call opened the first one.
+        # A caller-supplied env, or a list of them, stays as given.
+        ranked = _read_core_cpus() if own_env else []
+        if own_env:
+            worker_n = _worker_count(rl_cfg.get("workers"), group_size, _fast_cpus(ranked))
+            while len(envs) < worker_n:
+                envs.append(make_track(cfg))
+        cars = [_Car(one) for one in envs]
+        pinned = _pin_physics(envs, ranked) if own_env else []
+        # readline on the host pipe releases the GIL, so these overlap.
+        if len(cars) > 1:
+            pool = ThreadPoolExecutor(max_workers=len(cars))
+        where = ",".join(str(cpu) for cpu in pinned) if pinned else "any"
+        log.info("Stepping %s physics worker(s) on cpu %s.", len(cars), where)
+        if pool is None:
+            for one in cars:
+                begin_car(one)
+        else:
+            list(pool.map(begin_car, cars))
         while max_updates is None or updates < max_updates:
-            observation = torch.from_numpy(numbers.vector()).unsqueeze(0).to(device)
+            observation = torch.from_numpy(np.stack([one.numbers.vector() for one in cars])).to(device)
             with torch.no_grad():
                 action, logp, value = model.act(observation, unimix=unimix, greedy=False)
-            action_id = int(action.item())
-            _frame, reward, done, info = env.step(action_id)
-            if not info.get("counted", False):
-                continue
-            stored_obs.append(numbers.vector())
-            numbers.advance(info, action_id)
-            stored_actions.append(action_id)
-            stored_logp.append(float(logp.item()))
-            stored_values.append(float(value.item()))
-            stored_rewards.append(float(reward))
-            stored_dones.append(1.0 if done else 0.0)
-            stored_progress.append(float(info.get("progress") or 0.0))
-            current_return += float(reward)
-            current_length += 1
-            if stop_at is not None:
-                car = info["state"]
-                episode_trace.append(
-                    {
-                        "frames": int(car["frames"]),
-                        "progress": float(info.get("progress") or 0.0),
-                        "checkpoint": int(car["nextCheckpointIndex"]),
-                        "speed": float(car["speedKmh"]),
-                        "action": action_id,
-                        "position": {axis: float(car["position"][axis]) for axis in "xyz"},
-                        "quaternion": {axis: float(car["quaternion"][axis]) for axis in "xyzw"},
-                    }
-                )
-                if passed_at is None and float(info.get("progress") or 0.0) >= stop_at:
-                    passed_at = int(car["frames"])
-                    log.info("Cleared the gate at %.2fs, progress %.2f.", passed_at * 0.001, info.get("progress") or 0.0)
-                if passed_at is not None and (done or int(car["frames"]) >= passed_at + 2000):
-                    save_checkpoint(out_dir / "last.pt", model, {**meta, "update": updates, "progress": float(info.get("progress") or 0.0)})
-                    save_pass(float(info.get("progress") or 0.0))
-                    break
-            if done:
-                episode_returns.append(current_return)
-                episode_lengths.append(current_length)
+            jobs = [(one, int(action[index].item())) for index, one in enumerate(cars)]
+            if pool is None:
+                results = [step_car(jobs[0])]
+            else:
+                results = list(pool.map(step_car, jobs))
+            stopping = False
+            reset_cars: list[_Car] = []
+            for index, one in enumerate(cars):
+                _frame, reward, done, info = results[index]
+                if not info.get("counted", False):
+                    continue
+                action_id = jobs[index][1]
+                one.obs.append(one.numbers.vector())
+                one.numbers.advance(info, action_id)
+                one.actions.append(action_id)
+                one.logp.append(float(logp[index].item()))
+                one.values.append(float(value[index].item()))
+                reward_t = float(reward)
+                # A timeout is a cut, not a death. Fold one bootstrap into the last
+                # reward and keep done set, so the next lap does not leak in.
+                if (
+                    done
+                    and info.get("timeout")
+                    and not info.get("finished")
+                    and not info.get("fell")
+                    and not info.get("stuck")
+                    and not info.get("beached")
+                ):
+                    post = torch.from_numpy(one.numbers.vector()).unsqueeze(0).to(device)
+                    with torch.no_grad():
+                        _logits, post_value = model(post)
+                    reward_t += gamma * float(post_value.item())
+                one.rewards.append(reward_t)
+                one.dones.append(1.0 if done else 0.0)
+                one.progress.append(float(info.get("progress") or 0.0))
+                one.ret += float(reward)
+                one.length += 1
+                if stop_at is not None:
+                    state = info["state"]
+                    one.trace.append(
+                        {
+                            "frames": int(state["frames"]),
+                            "progress": float(info.get("progress") or 0.0),
+                            "checkpoint": int(state["nextCheckpointIndex"]),
+                            "speed": float(state["speedKmh"]),
+                            "action": action_id,
+                            "position": {axis: float(state["position"][axis]) for axis in "xyz"},
+                            "quaternion": {axis: float(state["quaternion"][axis]) for axis in "xyzw"},
+                        }
+                    )
+                    if one.passed_at is None and float(info.get("progress") or 0.0) >= stop_at:
+                        one.passed_at = int(state["frames"])
+                        log.info(
+                            "Cleared the gate at %.2fs, progress %.2f.",
+                            one.passed_at * 0.001,
+                            info.get("progress") or 0.0,
+                        )
+                    if one.passed_at is not None and (done or int(state["frames"]) >= one.passed_at + 2000):
+                        save_checkpoint(
+                            out_dir / "last.pt",
+                            model,
+                            {**meta, "update": updates, "progress": float(info.get("progress") or 0.0)},
+                        )
+                        save_pass(float(info.get("progress") or 0.0), one)
+                        stopping = True
+                        continue
+                if not done:
+                    continue
+                stored_obs.extend(one.obs)
+                stored_actions.extend(one.actions)
+                stored_logp.extend(one.logp)
+                stored_values.extend(one.values)
+                stored_rewards.extend(one.rewards)
+                stored_dones.extend(one.dones)
+                stored_progress.extend(one.progress)
+                episode_returns.append(one.ret)
+                episode_lengths.append(one.length)
                 finished = bool(info.get("finished"))
                 state = info["state"]
-                seconds = (
-                    int(state["finishFrames"]) * 0.001
-                    if finished
-                    else int(state["frames"]) * 0.001
-                )
+                seconds = int(state["finishFrames"]) * 0.001 if finished else int(state["frames"]) * 0.001
                 write_episode(
                     seconds,
                     float(info.get("progress") or 0.0),
                     finished,
-                    current_return,
-                    current_length,
+                    one.ret,
+                    one.length,
                 )
-                current_return = 0.0
-                current_length = 0
-                if info.get("finished"):
+                episode_ends.append((float(info.get("progress") or 0.0), seconds if finished else None))
+                one.clear()
+                if finished:
                     lap_s = int(info["state"]["finishFrames"]) * 0.001
                     if best_lap is None or lap_s < best_lap:
                         best_lap = lap_s
@@ -521,17 +736,29 @@ def train_ppo(
                             model,
                             {**meta, "update": updates, "progress": float(info.get("progress") or 0.0)},
                         )
-                        break
-                episode_trace.clear()
-                passed_at = None
-                _begin(env, numbers)
-                if len(episode_returns) >= group_size:
-                    flush()
+                        stopping = True
+                        continue
+                if not stopping:
+                    reset_cars.append(one)
+            if stopping:
+                break
+            if len(episode_returns) >= group_size:
+                flush()
+            if max_updates is not None and updates >= max_updates:
+                break
+            if reset_cars:
+                if pool is None or len(reset_cars) == 1:
+                    for one in reset_cars:
+                        begin_car(one)
+                else:
+                    list(pool.map(begin_car, reset_cars))
     except KeyboardInterrupt:
         log.info("Stopped.")
     finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
         try:
-            spawn_chord, spawn_probs = _spawn_policy(model, env, device)
+            spawn_chord, spawn_probs = _spawn_policy(model, envs[0], device)
             throttle_name = "w" if "w" in spawn_probs else "up"
             log.info(
                 "spawn policy top %s (%.2f), straight throttle %.2f",
@@ -542,7 +769,8 @@ def train_ppo(
         except Exception:
             log.warning("Could not read the policy at the spawn.", exc_info=True)
         if own_env:
-            env.close()
+            for one in envs:
+                one.close()
     return {
         "updates": updates,
         "best_progress": best_progress,

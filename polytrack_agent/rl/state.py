@@ -143,32 +143,16 @@ class LapNumbers:
     def __init__(self, n_actions: int):
         self.n_actions = int(n_actions)
         self._vector = np.zeros(obs_dim(self.n_actions), dtype=np.float32)
-        self._velocity = (0.0, 0.0, 0.0)
 
     def reset(self) -> None:
         self._vector[:] = 0.0
-        self._velocity = (0.0, 0.0, 0.0)
 
     def vector(self) -> np.ndarray:
         return self._vector.copy()
 
     def advance(self, info: dict, action_id: int) -> None:
         """Store the car state that the next decision will read."""
-        state = info["state"]
-        velocity = state.get("velocity") or {}
-        current = (
-            float(velocity.get("x") or 0.0),
-            float(velocity.get("y") or 0.0),
-            float(velocity.get("z") or 0.0),
-        )
-        dt = float(info.get("dt") or 0.0)
-        if dt > 1e-6:
-            previous = self._velocity
-            acceleration = tuple((current[i] - previous[i]) / dt for i in range(3))
-        else:
-            acceleration = (0.0, 0.0, 0.0)
-        self._velocity = current
-        features = _policy_features(state, acceleration)
+        features = _policy_features(info["state"])
         if len(features) != FEATURES:
             raise RuntimeError(f"expected {FEATURES} car features, got {len(features)}")
         self._vector[:FEATURES] = np.asarray(features, dtype=np.float32)

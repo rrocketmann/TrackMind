@@ -104,9 +104,10 @@ def sac_update(
     """One discrete SAC step. The actor is a chord distribution, not a squashed Gaussian."""
     alpha = log_alpha.detach().exp()
     with torch.no_grad():
-        next_probs, next_log = _distribution(actor(next_obs)[0])
+        next_probs, _next_log = _distribution(actor(next_obs)[0])
         next_q = torch.minimum(*q_target(next_obs))
-        next_value = (next_probs * (next_q - alpha * next_log)).sum(dim=-1)
+        # Entropy stays in the actor loss. Folding it into this target swamped the driving reward.
+        next_value = (next_probs * next_q).sum(dim=-1)
         target = rewards + (1.0 - dones) * float(gamma) * next_value
 
     q1, q2 = q(obs)

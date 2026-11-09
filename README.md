@@ -6,9 +6,9 @@ PPO on one PolyTrack 0.6.3 track in the polytrack fork at `polytrack-0.6.3`. The
 
 ## What a step is
 
-`polytrack_agent/sim/host.mjs` loads `simulation_worker.bundle.js` in a Node vm and steps `polytrack_physics.wasm`. Patches stay in memory. The fork files on disk are not edited. The fast worker is pumped from Python, so a decision does not wait on a timer.
+`polytrack_agent/sim/host.mjs` loads `simulation_worker.bundle.js` in a Node vm and steps `polytrack_physics.wasm`. Patches stay in memory. The fork files on disk are not edited. The fast worker is pumped from Python, so a decision does not wait on a timer. Each decision steps the physics for that hold and reads the car once at the end.
 
-Each decision holds W, A, S, and D for 50 physics frames (50 ms). The worker ticks at 1 ms. Those four keys are the whole control set. Air pitch and roll reuse them while the car is off the ground. The nine actions are the exclusive combinations: throttle or brake or neither, and left or right or straight. Restart is not an action. An episode reset deletes the car and creates it at the start. The in-game respawn key would put the car back on the last checkpoint, so the trainer does not send it.
+Each decision holds W, A, S, and D for 50 physics frames (50 ms). The worker ticks at 1 ms. Training steps one car on each performance core at the same time, and pins each physics process to its own core. Those four keys are the whole control set. Air pitch and roll reuse them while the car is off the ground. The nine actions are the exclusive combinations: throttle or brake or neither, and left or right or straight. Restart is not an action. An episode reset deletes the car and creates it at the start. The in-game respawn key would put the car back on the last checkpoint, so the trainer does not send it.
 
 The observation is twelve numbers plus a one-hot of the previous action:
 
@@ -22,9 +22,9 @@ World position, acceleration, and gate distance are in the TrackData rows and ar
 
 `speedKmh` is not in the observation. It comes from wheel rotation, so a car spinning its wheels against a wall or in mid-air still reads as moving. The velocity vector is the motion the policy sees, and it also drives the stall timer.
 
-Reward is the change in progress and nothing else. Progress is the checkpoint index plus how far the car has driven toward the next gate, capped just short of the next index. Passing a gate and finishing the lap are that number moving forward. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, or the time limit.
+Reward is forward travel along the chord from the previous gate to the next one, plus speed toward that gate. Any movement forward along the track pays, and going back costs. Speed toward the gate pays up to a cap. A sudden drop in chassis speed costs, so a hit is worse than lifting off the throttle. Discount is 0.998 per decision, about 25 seconds at a 50 ms hold. Passing a gate and finishing the lap are that forward number moving on. An episode ends on a finish, a fall, a stall after the car has had time to leave the grid, no progress along the chord for the stall window, or the time limit.
 
-PPO checkpoints use arch `polytrack-specialist-0.6.3`. SAC checkpoints use `polytrack-sac-0.6.3`. A checkpoint loads only when the arch, the track name, and the observation width match. `best.pt` is the highest mean progress in an update. The measurements are in [DISCOVERIES.md](DISCOVERIES.md).
+PPO checkpoints use arch `polytrack-specialist-0.6.3`. SAC checkpoints use `polytrack-sac-0.6.3`. A checkpoint loads only when the arch, the track name, and the observation width match. `best.pt` is the furthest episode in an update. A finished lap replaces an unfinished one, and a faster finish replaces a slower one. The log's progress column is the mean of those episode ends. The measurements are in [DISCOVERIES.md](DISCOVERIES.md).
 
 ## Setup
 
@@ -110,11 +110,15 @@ The recorder script (`scripts/record.mjs`) that captured the real PolyTrack page
 | `rl.reset_action` / `rl.auto_respawn` | opt-in 10th reset action, and respawning at a checkpoint on beaching or a stall |
 | `rl.stop_time` | stop training once a lap finishes at or below this many seconds |
 | `rl.group_size` | laps collected before one PPO update |
+| `rl.workers` | physics processes stepped together. Empty uses one per performance core, capped at the lap group |
 | `rl.out_dir` | checkpoint directory |
-| `reward.progress_scale` / `time_penalty` / `finish_bonus` | reward terms |
+| `reward.progress_scale` | pay per gate of forward travel along the chord |
+| `reward.speed_reward` / `speed_cap_kmh` | pay per decision for speed toward the next gate, and where that pay stops growing |
+| `reward.speed_drop_penalty` / `speed_drop_margin` | cost for a sudden loss of chassis speed, and the km/h per second that is still free |
+| `reward.time_penalty` / `finish_bonus` | optional per-second time cost, finish bonus |
+| `reward.fail_penalty` / `offtrack_penalty` | optional one cost for a failed episode, optional per-second cost past the road edge |
 | `reward.contact_reward` / `respawn_penalty` / `beach_penalty` | per-step pay for wheels on the road, cost per respawn, one-off cost for leaving the road |
 | `reward.stall_penalty` | per-step cost for sitting on the road without covering ground |
-| `reward.speed_reward` / `speed_cap_kmh` | per-step pay for ground speed while the wheels are down, and the speed where it stops growing |
 
 The default track is `tracks/official/winter4.track`, the official track with the most laps in TrackData. Training replaces that path when another track becomes the most common. Any other official or community `.track` in that checkout works after the same parts dump. The dump is the page's track-piece catalog, shared across tracks. It also stores the car collision hull and the mass offset from that same Init message. The 0.6.3 hull in `models/car.glb` is Draco-compressed, so the host cannot read it from the file. Mountains still come from the game's random table in `main.bundle.js`.
 

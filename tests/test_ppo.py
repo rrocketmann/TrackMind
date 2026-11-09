@@ -24,9 +24,28 @@ from polytrack_agent.rl.state import FEATURES, NAMES, RECORDED, LapNumbers, obs_
 from polytrack_agent.rl.track import game_root, make_track, road_border
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.seed import set_seed
-from polytrack_agent.rl.trainer import summarize_trials, train_ppo
+from polytrack_agent.rl.trainer import _fast_cpus, _rank_core_cpus, _worker_count, summarize_trials, train_ppo
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_physics_workers_use_the_fast_cores():
+    """Two logical cpus on one core count once. Slower cores are not the default."""
+    ranked = _rank_core_cpus(
+        [
+            (0, 1, 4800000),
+            (0, 0, 4800000),
+            (4, 3, 4800000),
+            (4, 2, 4800000),
+            (8, 4, 3600000),
+        ]
+    )
+    assert ranked == [(4800000, 0), (4800000, 2), (3600000, 4)]
+    assert _fast_cpus(ranked) == [0, 2]
+    assert _worker_count(None, 4, [0, 2]) == 2
+    assert _worker_count(None, 4, []) == 1
+    assert _worker_count(0, 4, [0, 2]) == 1
+    assert _worker_count(8, 4, [0, 2]) == 8
 
 
 def test_wasd_is_nine_exclusive_holds():
@@ -301,12 +320,15 @@ def test_entropy_wobble_keeps_a_near_miss_and_catches_a_far_one():
     bias = model.policy.bias.detach().clone()
     near = hold_entropy(model, observations, 0.0, 0.90, 0.92, 0.04, 0.08)
     assert near == pytest.approx(0.90)
+    assert hold_entropy.scale == pytest.approx(1.0)
     assert torch.equal(model.policy.bias, bias)
     with torch.no_grad():
         model.policy.bias.zero_()
         model.policy.bias[0] = 8.0
     caught = hold_entropy(model, observations, 0.0, 0.05, 0.90, 0.04, 0.08)
-    assert caught == pytest.approx(0.86, abs=0.03)
+    # One update reels at most 0.15 nats toward the band. 0.05 moves to 0.20.
+    assert caught == pytest.approx(0.20, abs=0.03)
+    assert hold_entropy.scale != pytest.approx(1.0)
 
 
 def test_ppo_loss_is_finite():
@@ -655,6 +677,7 @@ def test_slow_but_moving_car_is_not_treated_as_stalled():
     cfg["reward"]["stall_penalty"] = -0.5
     cfg["reward"]["time_penalty"] = 0.0
     cfg["reward"]["speed_reward"] = 0.0
+    cfg["reward"]["progress_scale"] = 0.0
     client = _CrawlingClient()
     env = make_track(cfg, client=client)
     try:
@@ -732,6 +755,8 @@ def test_passing_a_gate_pays_only_the_progress_change():
     cfg["reward"]["time_penalty"] = 0.0
     cfg["reward"]["finish_bonus"] = 0.0
     cfg["reward"]["progress_scale"] = 1.0
+    cfg["reward"]["speed_reward"] = 0.0
+    cfg["reward"]["speed_drop_penalty"] = 0.0
     env = make_track(cfg, client=_PassingClient())
     try:
         env.reset()
@@ -743,6 +768,32 @@ def test_passing_a_gate_pays_only_the_progress_change():
         assert info["state"]["nextCheckpointIndex"] == 1
         # The old reward added another +1 on this step, on top of the progress jump.
         assert second == pytest.approx(info["progress"] - before)
+    finally:
+        env.close()
+
+
+def test_progress_lands_on_the_gate():
+    """The chord fraction reaches 1 at the gate. There is no dead zone short of it."""
+    cfg = load_config(None)
+    cfg["reward"]["time_penalty"] = 0.0
+    env = make_track(cfg, client=_ParkedClient())
+    try:
+        env.reset()
+        env.gates = [(10.0, 0.0, 0.0)]
+        env.finish = (20.0, 0.0, 0.0)
+        env._origin_xz = (0.0, 0.0)
+        assert env._progress_of(
+            {"nextCheckpointIndex": 0, "position": {"x": 10.0, "y": 0.0, "z": 0.0}},
+            False,
+        ) == pytest.approx(1.0)
+        assert env._progress_of(
+            {"nextCheckpointIndex": 0, "position": {"x": 5.0, "y": 0.0, "z": 0.0}},
+            False,
+        ) == pytest.approx(0.5)
+        assert env._progress_of(
+            {"nextCheckpointIndex": 0, "position": {"x": 0.0, "y": 0.0, "z": 0.0}},
+            False,
+        ) == pytest.approx(0.0)
     finally:
         env.close()
 
@@ -762,6 +813,64 @@ def test_stall_penalty_punishes_sitting_still():
             rewards.append(reward)
         # Every idle step on the road pays the stall penalty, not just the clock.
         assert all(r <= -0.5 for r in rewards)
+    finally:
+        env.close()
+
+
+class _DriftingClient:
+    """Chassis speed with no change in position, so chord progress stays flat."""
+
+    def __init__(self):
+        self.checkpoint_count = 3
+        self.parts = []
+        self.frames = 0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.frames = int(frames)
+        return self._state()
+
+    def _state(self) -> dict:
+        return {
+            "frames": self.frames,
+            "speedKmh": 120.0,
+            "velocity": {"x": 20.0, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 0,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": [True, True, True, True],
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def test_no_progress_ends_a_drifting_car():
+    cfg = load_config(None)
+    cfg["rl"]["action_repeat"] = 1000
+    cfg["rl"]["stuck_s"] = 2.0
+    cfg["rl"]["timeout_s"] = 90
+    cfg["reward"]["stall_penalty"] = 0.0
+    cfg["reward"]["time_penalty"] = 0.0
+    cfg["reward"]["fail_penalty"] = 0.0
+    env = make_track(cfg, client=_DriftingClient())
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        done = False
+        info = {}
+        for _ in range(8):
+            _frame, _reward, done, info = env.step(forward)
+            if done:
+                break
+        assert done and info["stuck"] and not info["timeout"]
+        assert info["ground_speed"] > 3.0
+        assert int(info["state"]["frames"]) < 90000
     finally:
         env.close()
 
@@ -843,6 +952,8 @@ def test_speed_reward_pays_on_the_road_only():
     cfg["rl"]["action_repeat"] = 10
     cfg["reward"]["speed_reward"] = 0.5
     cfg["reward"]["speed_cap_kmh"] = 90.0
+    cfg["reward"]["time_penalty"] = 0.0
+    cfg["reward"]["progress_scale"] = 0.0
     env = make_track(cfg, client=_RollingClient(speed=25.0))
     try:
         env.reset()
@@ -882,9 +993,188 @@ def test_speed_reward_ignores_wheels_spinning_on_a_wall():
         _frame, baseline, _done, _info = env.step(forward)
     finally:
         env.close()
-    # The speed term contributes only the sliver for the 0.01 m/s drift
-    # (0.5 * 0.25 * 0.036/120), so the two runs agree to well within a percent.
+    # The speed term contributes only the sliver for the 0.01 m/s drift,
+    # so the two runs agree to well within a percent.
     assert rewarded == pytest.approx(baseline, rel=1e-3)
+
+
+class _SpinningClient:
+    """Wheels report 120 km/h and the chassis velocity is exactly zero."""
+
+    def __init__(self):
+        self.checkpoint_count = 2
+        self.parts = []
+        self.frames = 0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.frames = int(frames)
+        return self._state()
+
+    def _state(self) -> dict:
+        return {
+            "frames": self.frames,
+            "speedKmh": 120.0,
+            "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 0,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": [True, True, True, True],
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def test_zero_velocity_does_not_pay_for_wheel_spin():
+    cfg = load_config(None)
+    cfg["rl"]["action_repeat"] = 10
+    cfg["reward"]["speed_reward"] = 0.5
+    cfg["reward"]["time_penalty"] = 0.0
+    cfg["reward"]["progress_scale"] = 0.0
+    cfg["reward"]["stall_penalty"] = 0.0
+    env = make_track(cfg, client=_SpinningClient())
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        _frame, rewarded, _done, info = env.step(forward)
+        assert info["ground_speed"] == pytest.approx(0.0)
+    finally:
+        env.close()
+    plain = load_config(None)
+    plain["rl"]["action_repeat"] = 10
+    plain["reward"]["speed_reward"] = 0.0
+    plain["reward"]["time_penalty"] = 0.0
+    plain["reward"]["progress_scale"] = 0.0
+    plain["reward"]["stall_penalty"] = 0.0
+    env = make_track(plain, client=_SpinningClient())
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        _frame, baseline, _done, _info = env.step(forward)
+    finally:
+        env.close()
+    assert rewarded == pytest.approx(baseline)
+
+
+class _PlanClient:
+    """Reports a scripted x position and x velocity, including the reset sample."""
+
+    def __init__(self, positions: list[float], speeds: list[float]):
+        self.positions = list(positions)
+        self.speeds = list(speeds)
+        self.checkpoint_count = 2
+        self.parts = []
+        self.frames = 0
+        self.i = 0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        self.i = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.frames = int(frames)
+        self.i += 1
+        return self._state()
+
+    def _state(self) -> dict:
+        x = self.positions[min(self.i, len(self.positions) - 1)]
+        speed = self.speeds[min(self.i, len(self.speeds) - 1)]
+        return {
+            "frames": self.frames,
+            "speedKmh": abs(speed) * 3.6,
+            "velocity": {"x": speed, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 0,
+            "position": {"x": x, "y": 0.0, "z": 0.0},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": [True, True, True, True],
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def _quiet_reward(**overrides):
+    cfg = load_config(None)
+    cfg["rl"]["action_repeat"] = 50
+    cfg["rl"]["stuck_s"] = 30
+    cfg["rl"]["timeout_s"] = 30
+    cfg["reward"]["time_penalty"] = 0.0
+    cfg["reward"]["progress_scale"] = 0.0
+    cfg["reward"]["speed_reward"] = 0.0
+    cfg["reward"]["speed_drop_penalty"] = 0.0
+    cfg["reward"]["stall_penalty"] = 0.0
+    cfg["reward"]["fail_penalty"] = 0.0
+    cfg["reward"]["offtrack_penalty"] = 0.0
+    cfg["reward"].update(overrides)
+    return cfg
+
+
+def test_forward_motion_along_the_chord_is_rewarded():
+    cfg = _quiet_reward(progress_scale=1.0)
+    env = make_track(cfg, client=_PlanClient([0.0, 4.0], [0.0, 0.0]))
+    try:
+        env.reset()
+        env.gates = [(40.0, 0.0, 0.0)]
+        env.finish = (80.0, 0.0, 0.0)
+        forward = forward_ids(env.keys)[0]
+        _frame, reward, _done, info = env.step(forward)
+        assert info["progress"] == pytest.approx(0.1)
+        assert reward == pytest.approx(0.1)
+    finally:
+        env.close()
+
+
+def test_speed_toward_the_gate_pays_and_away_costs():
+    def once(speed: float) -> float:
+        cfg = _quiet_reward(speed_reward=1.0, speed_cap_kmh=90.0)
+        env = make_track(cfg, client=_PlanClient([10.0], [speed]))
+        try:
+            env.reset()
+            env.gates = [(40.0, 0.0, 0.0)]
+            env.finish = (80.0, 0.0, 0.0)
+            env._origin_xz = (0.0, 0.0)
+            forward = forward_ids(env.keys)[0]
+            _frame, reward, _done, _info = env.step(forward)
+            return reward
+        finally:
+            env.close()
+
+    assert once(25.0) == pytest.approx(1.0)
+    assert once(-25.0) == pytest.approx(-1.0)
+
+
+def test_a_fast_drop_in_speed_is_penalized():
+    cfg = _quiet_reward(speed_drop_penalty=1.0, speed_drop_margin=1500.0, speed_cap_kmh=120.0)
+    env = make_track(cfg, client=_PlanClient([0.0, 0.0, 0.0], [30.0, 30.0, 2.0]))
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        _frame, held, _done, _info = env.step(forward)
+        _frame, crashed, _done, _info = env.step(forward)
+        # 30 m/s held, then 2 m/s. The free margin is 75 km/h in this 50 ms step.
+        assert held == pytest.approx(0.0, abs=1e-6)
+        assert crashed < -0.2
+    finally:
+        env.close()
+    gentle = _quiet_reward(speed_drop_penalty=1.0, speed_drop_margin=1500.0, speed_cap_kmh=120.0)
+    env = make_track(gentle, client=_PlanClient([0.0, 0.0, 0.0], [30.0, 30.0, 28.0]))
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        env.step(forward)
+        _frame, reward, _done, _info = env.step(forward)
+        assert reward == pytest.approx(0.0, abs=1e-6)
+    finally:
+        env.close()
 
 
 def test_border_is_the_side_of_the_road_not_the_joint():
@@ -900,6 +1190,15 @@ def test_border_is_the_side_of_the_road_not_the_joint():
     assert abs(side) == pytest.approx(2.0)
     off, _side = road_border(cells, 5.0, 4.0)
     assert off == pytest.approx(-1.5)
+
+
+def test_wide_road_center_is_not_the_edge():
+    cells = [
+        (0.0, 0.0), (5.0, 0.0), (10.0, 0.0),
+        (0.0, 5.0), (5.0, 5.0), (10.0, 5.0),
+    ]
+    clearance, _side = road_border(cells, 5.0, 2.5)
+    assert clearance == pytest.approx(5.0)
 
 
 def test_acceleration_is_the_change_in_velocity():
@@ -996,12 +1295,73 @@ def test_steer_lands_on_the_same_frames_after_the_worker_ages():
         env.close()
 
 
+class _ShortClient:
+    """One decision reaches the timeout. Counts steps so each car must run."""
+
+    def __init__(self):
+        self.checkpoint_count = 2
+        self.parts = []
+        self.frames = 0
+        self.steps = 0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.steps += 1
+        self.frames = int(frames)
+        return self._state()
+
+    def _state(self) -> dict:
+        return {
+            "frames": self.frames,
+            "speedKmh": 0.0,
+            "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 0,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": [True, True, True, True],
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def test_several_cars_finish_one_update_together(tmp_path):
+    """Three envs time out on their first decision and produce one update."""
+    if not _sim_ready():
+        pytest.skip("polytrack fork simulation or the mesh cache is not available")
+    cfg = load_config(None)
+    cfg["rl"]["out_dir"] = str(tmp_path / "run")
+    cfg["rl"]["group_size"] = 3
+    cfg["rl"]["timeout_s"] = 0.05
+    cfg["rl"]["stuck_s"] = 30
+    cfg["rl"]["epochs"] = 1
+    cfg["rl"]["minibatch_size"] = 4
+    cfg["rl"]["hidden"] = 32
+    cfg["rl"]["device"] = "cpu"
+    cfg["rl"]["resume"] = False
+    cfg["rl"]["bc"] = {"enabled": False}
+    envs = [make_track(cfg, client=_ShortClient()) for _ in range(3)]
+    try:
+        report = train_ppo(cfg, env=envs, max_updates=1)
+    finally:
+        for one in envs:
+            one.close()
+    assert report["updates"] == 1
+    assert [one.client.steps for one in envs] == [1, 1, 1]
+
+
 def test_one_ppo_update_on_the_sim(tmp_path):
     if not _sim_ready():
         pytest.skip("polytrack fork simulation or the mesh cache is not available")
     cfg = load_config(None)
     cfg["rl"]["out_dir"] = str(tmp_path / "run")
     cfg["rl"]["group_size"] = 2
+    cfg["rl"]["workers"] = 1
     cfg["rl"]["timeout_s"] = 0.4
     cfg["rl"]["stuck_s"] = 30
     cfg["rl"]["epochs"] = 1

@@ -57,7 +57,13 @@ def ppo_update(
     entropy_coef: float,
     value_coef: float,
     unimix: float,
+    update_policy: bool = True,
 ) -> dict[str, float]:
+    """One PPO step. `update_policy=False` trains the critic and leaves the actor alone.
+
+    AdamW skips a parameter with no gradient, so a value-only step does not
+    decay the cloned actor.
+    """
     advantages = (advantages - advantages.mean()) / advantages.std().clamp_min(1e-8)
     count = int(actions.shape[0])
     last_stats = {"loss": 0.0, "policy": 0.0, "value": 0.0, "entropy": 0.0}
@@ -67,18 +73,28 @@ def ppo_update(
         for start in range(0, count, max(1, int(minibatch_size))):
             batch = order[start : start + minibatch_size]
             logits, values = model(tokens[batch])
-            loss, last_stats = ppo_loss(
-                logits,
-                values,
-                actions[batch],
-                old_logp[batch],
-                advantages[batch],
-                returns[batch],
-                clip,
-                entropy_coef,
-                value_coef,
-                unimix,
-            )
+            if update_policy:
+                loss, last_stats = ppo_loss(
+                    logits,
+                    values,
+                    actions[batch],
+                    old_logp[batch],
+                    advantages[batch],
+                    returns[batch],
+                    clip,
+                    entropy_coef,
+                    value_coef,
+                    unimix,
+                )
+            else:
+                value_loss = (values - returns[batch]).pow(2).mean()
+                loss = float(value_coef) * value_loss
+                last_stats = {
+                    "loss": float(loss.detach()),
+                    "policy": 0.0,
+                    "value": float(value_loss.detach()),
+                    "entropy": 0.0,
+                }
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -125,6 +141,7 @@ def set_entropy(
                 if at(sharp) <= goal:
                     break
         elif at(soft) < goal:
+            set_entropy.scale = soft
             return at(soft)
         for _ in range(24):
             mid = (soft + sharp) / 2.0
@@ -132,7 +149,12 @@ def set_entropy(
                 soft = mid
             else:
                 sharp = mid
+        set_entropy.scale = sharp
         return at(sharp)
+
+
+# How far one update may reel entropy toward the schedule, in nats.
+_ENTROPY_REEL = 0.15
 
 
 def hold_entropy(
@@ -144,14 +166,23 @@ def hold_entropy(
     band: float,
     floor: float,
 ) -> float:
-    """Leave entropy alone inside a band around the schedule. Outside it, move to the edge."""
+    """Leave entropy alone inside a band. Outside it, step at most 0.15 nats toward the edge.
+
+    `hold_entropy.scale` is the logit multiplier that was applied. 1 means the
+    weights were left as they were.
+    """
     width = abs(float(band))
     low = max(float(floor), float(target) - width)
     high = float(target) + width
-    if low <= float(measured) <= high:
-        return float(measured)
-    edge = low if float(measured) < low else high
-    return set_entropy(model, observations, unimix, edge)
+    measured = float(measured)
+    if low <= measured <= high:
+        hold_entropy.scale = 1.0
+        return measured
+    edge = low if measured < low else high
+    delta = min(_ENTROPY_REEL, max(-_ENTROPY_REEL, edge - measured))
+    landed = set_entropy(model, observations, unimix, measured + delta)
+    hold_entropy.scale = float(getattr(set_entropy, "scale", 1.0))
+    return landed
 
 
 def clear_policy_moments(optimizer: torch.optim.Optimizer, model: StateActorCritic) -> None:
