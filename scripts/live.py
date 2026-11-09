@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Open a window that redraws the specialist run as new laps and updates land."""
+"""Draw the live graphs for a specialist run.
+
+    python scripts/live.py --run runs/winter4
+
+The window tails that directory's episodes.csv and log.csv and redraws lap
+progress, lap time, update progress, and entropy. A chase-camera video of a
+saved checkpoint is scripts/record.py, played in the local game.
+"""
 
 from __future__ import annotations
 

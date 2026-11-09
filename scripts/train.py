@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Train PPO on the PolyTrack 0.6.3 fork simulation."""
+"""Train PPO on the PolyTrack 0.6.3 fork simulation.
+
+Graphs of the run: python scripts/live.py --run runs/<name>
+A chase-camera video of a checkpoint: python scripts/record.py --checkpoint <pt> --out <mp4>
+"""
 
 import sys
 from pathlib import Path

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run greedy episodes in the PolyTrack 0.6.3 fork simulation."""
+"""Run greedy episodes in the PolyTrack 0.6.3 fork simulation.
+
+This prints lap numbers only. Graphs are scripts/live.py. A chase-camera
+video of the same checkpoint is scripts/record.py.
+"""
 
 import sys
 from pathlib import Path

@@ -52,6 +52,8 @@ node scripts/dump_parts.mjs "$POLYTRACK_ROOT" /path/to/track_parts.json
 ```bash
 python scripts/train.py
 python scripts/play.py --episodes 5
+python scripts/live.py --run runs/winter4
+python scripts/record.py --checkpoint runs/winter4/best.pt --out runs/winter4/best.mp4
 ```
 
 `scripts/train.py` clones the best TrackData laps, then runs PPO until a lap matches that time or you stop it. It writes `runs/winter4/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/winter4/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode. The fly-over run stays in `runs/ppo-reward`. The SAC runs stay in `runs/sac` and `runs/sac-blowup`. The older PPO run stays in `runs/summer1`.
@@ -68,35 +70,25 @@ Training saves `last.pt` and exits on the first lap at or below 25 s. The same f
 
 `scripts/play.py --episodes 5` loads `runs/winter4/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
 
-## First checkpoint
+## Watch a run
 
-[runs/summer1/gate.mp4](runs/summer1/gate.mp4) is the chase-camera lap that first cleared Summer 1 checkpoint 1. It is 30 seconds. The car leaves the start, takes the S-bend, and goes under the yellow gate at 28.2 s.
-
-This video was recorded from the polytrack fork simulation that this agent drives, not from any external page. The program does not open external pages, read their memory, or submit a leaderboard time.
-
-There is no display on the training machine, so play the file where you have a screen:
+`scripts/live.py` opens the graphs. It tails `episodes.csv` and `log.csv` in the run directory and redraws four panels once a second: lap progress, lap time, update progress, and entropy. Training does not open this window.
 
 ```bash
-ffplay -autoexit runs/summer1/gate.mp4
+python scripts/live.py --run runs/winter4
 ```
 
-From another computer, without cloning:
+`scripts/record.py` writes a chase-camera mp4 of a saved checkpoint. The drive is greedy. It is a fresh playback of the weights, not the stochastic episode that produced the checkpoint. The picture is the local checkout in `POLYTRACK_ROOT`, served on 127.0.0.1. Every other request is blocked. The script does not open an external page and does not submit a time.
 
 ```bash
-ffplay -autoexit https://github.com/rrocketmann/TrackMind/raw/refs/heads/main/runs/summer1/gate.mp4
+python scripts/record.py --checkpoint runs/winter4/best.pt --out runs/winter4/best.mp4
 ```
 
-A sample real-PolyTrack recording is committed at `runs/real_polytrack.mp4` (15 s). The polytrack fork gate pass remains at `runs/summer1/gate.mp4`:
+The game clock follows the display frame rate and does not catch up, so the recording needs `DISPLAY` and a GPU that holds about 60 fps. The script stops when the game renders under 25 fps. A virtual framebuffer is too slow. This machine's ffmpeg has no libx264, so the file is encoded with libopenh264. `runs/winter4-live/best.mp4` is one such recording. The browser half is `scripts/record_game.mjs`. The old `scripts/record.mjs`, which opened an external page, is gone.
 
-```bash
-ffplay -autoexit runs/summer1/gate.mp4
-```
+`runs/summer1/last.pt` is an older `polytrack-ppo-v1` actor, 24 inputs, progress 1.03, and it had not taken a PPO step yet. `runs/summer1/best.pt` is an earlier 21-input actor from update 18. The current observation does not load it.
 
-The recorder script (`scripts/record.mjs`) that captured the real PolyTrack page was removed; the committed MP4s remain as samples. The program does not open external pages, read their memory, or submit a leaderboard time.
-
-`runs/summer1/last.pt` is the actor saved with that lap. It is `polytrack-ppo-v1`, 24 inputs, progress 1.03, and it had not taken a PPO step yet. `runs/summer1/best.pt` is an earlier 21-input actor from update 18. The current observation does not load it.
-
-`POLYTRACK_ROOT` overrides `game.root`. Both commands also take `--config some.yaml`, merged onto `polytrack_agent/default_config.yaml`. Useful fields:
+`POLYTRACK_ROOT` overrides `game.root`. Train, play, and record also take `--config some.yaml`, merged onto `polytrack_agent/default_config.yaml`. Useful fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -128,6 +120,9 @@ The default track is `tracks/official/winter4.track`, the official track with th
 polytrack_agent/sim/     Node host, Python client, generated mesh cache
 polytrack_agent/rl/      observation, track env, PPO
 scripts/dump_parts.mjs   one-time mesh dump
-scripts/train.py
-scripts/play.py
+scripts/train.py         PPO. See the docstring for the graph and video commands
+scripts/play.py          greedy laps in the simulation, numbers only
+scripts/live.py          four live graphs for a run directory
+scripts/record.py        chase-camera video of a checkpoint in the local game
+scripts/record_game.mjs  local page, capture, and encode used by record.py
 ```

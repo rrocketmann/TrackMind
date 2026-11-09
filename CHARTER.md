@@ -7,3 +7,5 @@ The track is whichever official track has the most laps in TrackData. That is Wi
 The environment is the polytrack fork 0.6.3 worker. A perfect run is a finished lap at or under that best archived time. A dynamics model and a policy meant to transfer belong on `world-model`.
 
 The program steps the local worker. It does not open an external page, read its memory, or submit a time.
+
+`scripts/live.py` draws the run's graphs. `scripts/record.py` plays a saved checkpoint in the local game and writes a video. Neither opens an external page or submits a time.
