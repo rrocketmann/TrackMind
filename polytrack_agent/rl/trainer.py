@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from polytrack_agent.rl.bc import behavior_clone, load_demos
+from polytrack_agent.rl.bc import behavior_clone, load_best_line, load_demos
+from polytrack_agent.rl.line import ready_for_time
 from polytrack_agent.rl.device import resolve_device
 from polytrack_agent.rl.track import SchoolagyTrack, make_track
 from polytrack_agent.rl.actions import chord_name, n_actions
@@ -88,7 +89,9 @@ def _checkpoint_matches(path: Path, track: str, chords: int, width: int, hidden:
     )
 
 
-def _resume(path: Path, model: StateActorCritic, device: torch.device, track: str) -> tuple[int, float | None] | None:
+def _resume(
+    path: Path, model: StateActorCritic, device: torch.device, track: str
+) -> tuple[int, float | None, str | None] | None:
     if not path.is_file():
         return None
     payload = read_checkpoint(path, device)
@@ -110,8 +113,10 @@ def _resume(path: Path, model: StateActorCritic, device: torch.device, track: st
     update = int(payload.get("update") or 0)
     raw_target = payload.get("entropy_target")
     target = None if raw_target is None else float(raw_target)
+    raw_stage = payload.get("reward_stage")
+    stage = None if raw_stage is None else str(raw_stage)
     log.info("Resumed %s from update %s", path, update)
-    return update, target
+    return update, target, stage
 
 
 def _begin(env: SchoolagyTrack, numbers: LapNumbers) -> None:
@@ -260,8 +265,10 @@ def train_ppo(
 
     The actor sees velocity, heading, the road edge, and the next gate. Unless
     a checkpoint resumes, it first clones the fastest TrackData laps of the
-    most common track. The critic is trained on the discounted return of the
-    environment reward. A checkpoint resumes only when its track matches.
+    most common track, and the early PPO updates keep a clone loss. The reward
+    then follows that track's single best lap. Once a car finishes the lap or
+    covers most of it, the reward becomes lap time. The critic is trained on
+    the discounted return. A checkpoint resumes only when its track matches.
     Several cars step at once, one physics process each. A lap stays on its
     own car until it ends, and only then joins the update.
     """
@@ -291,19 +298,42 @@ def train_ppo(
         obs_dim(chords_planned),
         hidden,
     )
+    bc_epochs = int(bc_cfg.get("epochs") or 25)
+    bc_coef = float(0.0 if bc_cfg.get("coef") is None else bc_cfg.get("coef"))
+    bc_updates = int(150 if bc_cfg.get("updates") is None else bc_cfg.get("updates"))
+    resumed_update_hint = None
+    if resuming:
+        try:
+            hint = read_checkpoint(out_dir / "last.pt", torch.device("cpu"))
+            resumed_update_hint = int(hint.get("update") or 0)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            resumed_update_hint = None
+    reference = None
     demos = None
-    if bc_on and not resuming and env is None:
-        demos = load_demos(bc_cfg, keys)
-        cfg["game"]["track"] = demos.track_file
+    if bc_on and env is None:
+        reference = load_best_line(bc_cfg)
         log.info(
-            "BC warm start from %s laps of %s at or under %.3fs (best %.3fs, margin %.3fs, %s decisions).",
-            demos.laps,
-            demos.track,
-            demos.best_seconds + demos.margin_s,
-            demos.best_seconds,
-            demos.margin_s,
-            demos.steps,
+            "Reference lap is %s at %.3fs, %.0fm.",
+            reference.track,
+            reference.seconds,
+            reference.length,
         )
+        keep_cloning = bc_coef > 0.0 and bc_updates > 0 and (
+            not resuming or (resumed_update_hint is not None and resumed_update_hint < bc_updates)
+        )
+        if not resuming or keep_cloning:
+            demos = load_demos(bc_cfg, keys)
+            if not resuming:
+                cfg["game"]["track"] = demos.track_file
+                log.info(
+                    "BC warm start from %s laps of %s at or under %.3fs (best %.3fs, margin %.3fs, %s decisions).",
+                    demos.laps,
+                    demos.track,
+                    demos.best_seconds + demos.margin_s,
+                    demos.best_seconds,
+                    demos.margin_s,
+                    demos.steps,
+                )
     track = Path(cfg["game"]["track"]).stem
     log.info("PPO device %s (%s) track %s seed %s", device, hardware, track, "unset" if seed is None else int(seed))
     passed_envs = list(env) if isinstance(env, (list, tuple)) else None
@@ -322,6 +352,7 @@ def train_ppo(
     resumed = resumed_pair is not None
     resumed_update = None if resumed_pair is None else resumed_pair[0]
     entropy_target = None if resumed_pair is None else resumed_pair[1]
+    resumed_stage = None if resumed_pair is None else resumed_pair[2]
     entropy_cfg = dict(rl_cfg.get("entropy") or {})
     entropy_bump = float(0.5 if entropy_cfg.get("bump") is None else entropy_cfg.get("bump"))
     entropy_drop = float(0 if entropy_cfg.get("drop") is None else entropy_cfg.get("drop"))
@@ -343,7 +374,7 @@ def train_ppo(
         stats = behavior_clone(
             model,
             demos,
-            epochs=int(bc_cfg.get("epochs") or 5),
+            epochs=bc_epochs,
             batch_size=int(bc_cfg.get("batch_size") or 256),
             lr=float(bc_cfg.get("lr") or 1e-3),
             device=device,
@@ -358,6 +389,11 @@ def train_ppo(
     else:
         model.bias_toward_forward(env.keys, reset_action=getattr(env, "reset_action", False))
     model.eval()
+    bc_obs_t = None
+    bc_act_t = None
+    if demos is not None and bc_coef > 0.0 and bc_updates > 0:
+        bc_obs_t = torch.as_tensor(demos.observations, dtype=torch.float32, device=device)
+        bc_act_t = torch.as_tensor(demos.actions, dtype=torch.int64, device=device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(rl_cfg.get("lr") or 3e-4))
     group_size = max(2, int(rl_cfg.get("group_size") or 8))
     unimix = float(rl_cfg.get("unimix") or 0.0)
@@ -365,8 +401,13 @@ def train_ppo(
     lam = float(rl_cfg.get("lam") or 0.95)
     value_coef = float(rl_cfg.get("value_coef") or 0.5)
     meta = _meta(model, env.keys, track)
+    reward_stage = "chord"
+    book = {**meta, "reward_stage": reward_stage}
+    raw_close = (cfg.get("reward") or {}).get("line_close")
+    line_close = 0.9 if raw_close is None else float(raw_close)
     log_path = out_dir / "log.csv"
     best_progress = -1.0
+    best_line = -1.0
     best_seconds: float | None = None
     best_path = out_dir / "best.pt"
     if best_path.is_file():
@@ -382,9 +423,12 @@ def train_ppo(
                 best_progress = -1.0 if raw_progress is None else float(raw_progress)
                 raw_seconds = saved.get("finished_seconds")
                 best_seconds = None if raw_seconds is None else float(raw_seconds)
+                raw_line = saved.get("line")
+                best_line = -1.0 if raw_line is None else float(raw_line)
         except (OSError, KeyError, ValueError, TypeError):
             best_progress = -1.0
             best_seconds = None
+            best_line = -1.0
     stop_progress = rl_cfg.get("stop_progress")
     stop_at = None if stop_progress is None else float(stop_progress)
     stop_time = rl_cfg.get("stop_time")
@@ -429,13 +473,21 @@ def train_ppo(
     episode_log = out_dir / "episodes.csv"
     episode_index = 0
 
-    def write_episode(seconds: float, progress: float, finished: bool, episode_return: float, steps: int) -> None:
+    def write_episode(
+        seconds: float,
+        progress: float,
+        finished: bool,
+        episode_return: float,
+        steps: int,
+        line: float = 0.0,
+    ) -> None:
         nonlocal episode_index
         episode_index += 1
         record = {
             "episode": episode_index,
             "seconds": round(float(seconds), 3),
             "progress": round(float(progress), 4),
+            "line": round(float(line), 4),
             "finished": int(bool(finished)),
             "return": round(float(episode_return), 4),
             "steps": int(steps),
@@ -457,7 +509,7 @@ def train_ppo(
     stored_progress: list[float] = []
     episode_returns: list[float] = []
     episode_lengths: list[int] = []
-    episode_ends: list[tuple[float, float | None]] = []
+    episode_ends: list[tuple[float, float | None, float]] = []
     # Flush only sees finished laps. A car still driving keeps its steps, so this
     # stays zero and the update does not invent a partial episode.
     current_return = 0.0
@@ -486,17 +538,21 @@ def train_ppo(
     # once before the cloned actor takes a policy step.
     critic_ready = resumed
 
-    def _better(progress: float, seconds: float | None) -> bool:
+    def _better(progress: float, seconds: float | None, line: float) -> bool:
         if seconds is not None and best_seconds is None:
             return True
         if seconds is not None and best_seconds is not None:
             return seconds < best_seconds
-        if seconds is None and best_seconds is None:
-            return progress > best_progress
-        return False
+        if seconds is None and best_seconds is not None:
+            return False
+        # Before a finish, the reference lap is the score. Chord progress is
+        # what a jump off the road used to win with.
+        if reward_stage == "line":
+            return line > best_line
+        return progress > best_progress
 
     def flush() -> None:
-        nonlocal updates, best_progress, best_seconds, current_return, current_length, entropy_target, critic_ready
+        nonlocal updates, best_progress, best_line, best_seconds, current_return, current_length, entropy_target, critic_ready
         lengths = list(episode_lengths)
         returns_ep = list(episode_returns)
         ends = list(episode_ends)
@@ -504,7 +560,7 @@ def train_ppo(
             lengths.append(current_length)
             returns_ep.append(current_return)
             if stored_progress:
-                ends.append((float(stored_progress[-1]), None))
+                ends.append((float(stored_progress[-1]), None, 0.0))
             current_return = 0.0
             current_length = 0
         if sum(lengths) < 2:
@@ -526,6 +582,9 @@ def train_ppo(
             value_coef=value_coef,
             unimix=unimix,
             update_policy=critic_ready,
+            bc_observations=bc_obs_t if critic_ready and reward_stage == "line" and updates < bc_updates else None,
+            bc_actions=bc_act_t if critic_ready and reward_stage == "line" and updates < bc_updates else None,
+            bc_coef=bc_coef if critic_ready and reward_stage == "line" and updates < bc_updates else 0.0,
         )
         measured = float(stats["entropy"])
         if not critic_ready or entropy_target is None:
@@ -557,37 +616,60 @@ def train_ppo(
             stats["entropy"] = held
         if ends:
             mean_progress = float(np.mean([item[0] for item in ends]))
+            mean_line = float(np.mean([item[2] for item in ends]))
             finishes = [item for item in ends if item[1] is not None]
             if finishes:
-                candidate, candidate_seconds = min(finishes, key=lambda item: float(item[1]))
+                chosen = min(finishes, key=lambda item: float(item[1]))
+            elif reward_stage == "line":
+                chosen = max(ends, key=lambda item: float(item[2]))
             else:
-                candidate = float(max(item[0] for item in ends))
-                candidate_seconds = None
+                chosen = max(ends, key=lambda item: float(item[0]))
+            candidate = float(chosen[0])
+            candidate_seconds = None if chosen[1] is None else float(chosen[1])
+            candidate_line = float(chosen[2])
         else:
             mean_progress = 0.0
+            mean_line = 0.0
             candidate = 0.0
             candidate_seconds = None
+            candidate_line = 0.0
         mean_return = float(np.mean(returns_ep))
         updates += 1
         log.info(
-            "update %s  laps %s  return %.3f  progress %.3f  policy %.4f  value %.4f  entropy %.3f",
+            "update %s  laps %s  return %.3f  progress %.3f  line %.3f  policy %.4f  value %.4f  entropy %.3f  %s",
             updates,
             len(returns_ep),
             mean_return,
             mean_progress,
+            mean_line,
             stats["policy"],
             stats["value"],
             stats["entropy"],
+            reward_stage,
         )
-        payload = {**meta, "update": updates, "progress": float(candidate), "entropy_target": float(entropy_target)}
+        payload = {
+            **book,
+            "update": updates,
+            "progress": float(candidate),
+            "line": float(candidate_line),
+            "entropy_target": float(entropy_target),
+        }
         if candidate_seconds is not None:
             payload["finished_seconds"] = float(candidate_seconds)
         save_checkpoint(out_dir / "last.pt", model, payload)
-        if _better(float(candidate), None if candidate_seconds is None else float(candidate_seconds)):
+        if _better(float(candidate), candidate_seconds, float(candidate_line)):
             best_progress = float(candidate)
+            best_line = float(candidate_line)
             best_seconds = None if candidate_seconds is None else float(candidate_seconds)
             save_checkpoint(best_path, model, payload)
-        row = {"update": updates, **stats, "progress": mean_progress, "return": mean_return}
+        row = {
+            "update": updates,
+            **stats,
+            "progress": mean_progress,
+            "line": mean_line,
+            "return": mean_return,
+            "stage": reward_stage,
+        }
         rows.append(row)
         fresh = not log_path.is_file()
         with log_path.open("a", encoding="utf-8", newline="") as handle:
@@ -625,6 +707,16 @@ def train_ppo(
             while len(envs) < worker_n:
                 envs.append(make_track(cfg))
         cars = [_Car(one) for one in envs]
+        if reference is not None:
+            reward_stage = resumed_stage if resumed_stage in ("line", "time") else "line"
+            book["reward_stage"] = reward_stage
+            for one in cars:
+                one.env.use_line(reference, reward_stage)
+            log.info(
+                "Reward stage %s. The reference lap pays until %.0f%% or a finish, then lap time.",
+                reward_stage,
+                line_close * 100.0,
+            )
         pinned = _pin_physics(envs, ranked) if own_env else []
         # readline on the host pipe releases the GIL, so these overlap.
         if len(cars) > 1:
@@ -646,11 +738,19 @@ def train_ppo(
             else:
                 results = list(pool.map(step_car, jobs))
             stopping = False
+            promote = False
             reset_cars: list[_Car] = []
             for index, one in enumerate(cars):
                 _frame, reward, done, info = results[index]
                 if not info.get("counted", False):
                     continue
+                if ready_for_time(
+                    reward_stage,
+                    bool(info.get("finished")),
+                    float(info.get("line_progress") or 0.0),
+                    line_close,
+                ):
+                    promote = True
                 action_id = jobs[index][1]
                 one.obs.append(one.numbers.vector())
                 one.numbers.advance(info, action_id)
@@ -701,7 +801,13 @@ def train_ppo(
                         save_checkpoint(
                             out_dir / "last.pt",
                             model,
-                            {**meta, "update": updates, "progress": float(info.get("progress") or 0.0)},
+                            {
+                                **book,
+                                "update": updates,
+                                "progress": float(info.get("progress") or 0.0),
+                                "line": float(info.get("line_progress") or 0.0),
+                                **({} if entropy_target is None else {"entropy_target": float(entropy_target)}),
+                            },
                         )
                         save_pass(float(info.get("progress") or 0.0), one)
                         stopping = True
@@ -720,14 +826,18 @@ def train_ppo(
                 finished = bool(info.get("finished"))
                 state = info["state"]
                 seconds = int(state["finishFrames"]) * 0.001 if finished else int(state["frames"]) * 0.001
+                line_progress = float(info.get("line_progress") or 0.0)
                 write_episode(
                     seconds,
                     float(info.get("progress") or 0.0),
                     finished,
                     one.ret,
                     one.length,
+                    line_progress,
                 )
-                episode_ends.append((float(info.get("progress") or 0.0), seconds if finished else None))
+                episode_ends.append(
+                    (float(info.get("progress") or 0.0), seconds if finished else None, line_progress)
+                )
                 one.clear()
                 if finished:
                     lap_s = int(info["state"]["finishFrames"]) * 0.001
@@ -744,12 +854,27 @@ def train_ppo(
                         save_checkpoint(
                             out_dir / "last.pt",
                             model,
-                            {**meta, "update": updates, "progress": float(info.get("progress") or 0.0)},
+                            {
+                                **book,
+                                "update": updates,
+                                "progress": float(info.get("progress") or 0.0),
+                                "line": float(info.get("line_progress") or 0.0),
+                                **({} if entropy_target is None else {"entropy_target": float(entropy_target)}),
+                            },
                         )
                         stopping = True
                         continue
                 if not stopping:
                     reset_cars.append(one)
+            if promote and reward_stage == "line":
+                reward_stage = "time"
+                book["reward_stage"] = "time"
+                for one in cars:
+                    one.env.reward_stage = "time"
+                log.info(
+                    "A car finished or reached %.0f%% of the reference lap. Time reward is on.",
+                    line_close * 100.0,
+                )
             if stopping:
                 break
             if len(episode_returns) >= group_size:

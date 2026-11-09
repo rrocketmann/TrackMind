@@ -2,7 +2,10 @@
 # POLYTRACK_ROOT is the fork directory. The car is polytrack_physics.wasm.
 # The policy reads velocity, heading, the road edge, and the next gate.
 # Training copies the fastest laps of the most common track in TrackData
-# before PPO. TRACKDATA overrides rl.bc.root.
+# before PPO, and keeps a clone loss for the first updates. The reward follows
+# that track's best lap until a car finishes it or covers most of it, then
+# the reward is lap time. TRACKDATA overrides rl.bc.root.
+# runs/winter4 is the saved on-track run. This file starts a new directory.
 
 game:
   root: null             # overridden by POLYTRACK_ROOT or a --config overlay
@@ -51,25 +54,40 @@ rl:
   lr: 0.0003
   resume: true
   device: auto
-  out_dir: runs/winter4
+  out_dir: runs/winter4-follow
   # stop_time: 20.46    # otherwise the best cloned lap time
   bc:
     enabled: true
     root: null           # TRACKDATA, else ~/dev/trackdata
     margin_s: 0.5        # keep laps at or under the fastest time plus this
-    epochs: 5
+    epochs: 25           # longer clone before PPO, so the actor starts on the lap
     batch_size: 256
     lr: 0.001
+    coef: 0.25           # clone loss mixed into the first PPO updates
+    updates: 150         # those updates, and only while the reward is still the reference lap
 
 play:
-  checkpoint: runs/winter4/best.pt
+  checkpoint: runs/winter4-follow/best.pt
   device: auto
 
 reward:
-  # The score is forward travel along the chord to the next gate, plus speed
-  # toward that gate. Both are paid only while a wheel is on the road and the
-  # car is inside the road edge. A jump off the track does not score. A sudden
-  # loss of speed is a hit.
+  # The first stage follows the best archived lap: advance along that line,
+  # and a small cost for leaving it. Both are paid only on the road. The cursor
+  # only looks a short way ahead, and it still moves while the car is off the
+  # road, so a jump does not score. Once a car finishes or reaches line_close,
+  # the stage switches to time: a per-second cost, a finish bonus, and a bonus
+  # for beating the reference lap. The chord fields below are the fallback
+  # when no reference lap is loaded.
+  line_scale: 4.0         # a full reference lap pays this much for staying on it
+  line_lateral: 0.02      # per metre off the line, per second, on the road
+  line_lateral_cap: 12.0  # metres; past this the side cost stops growing
+  line_back_m: 8.0        # how far behind the cursor a step may match
+  line_forward_m: 40.0    # how far ahead a step may match. This blocks lap-skips
+  line_close: 0.9         # fraction of the reference lap that starts the time stage
+  time_stage_penalty: 0.25  # per second, time stage only
+  time_stage_bonus: 20.0    # paid on a finish in the time stage
+  time_scale: 1.0           # extra per second faster than the reference lap
+  time_line_scale: 1.0      # small along-track pay kept during the time stage
   progress_scale: 1.0     # forward chord progress pays this much per gate; backward costs it
   speed_reward: 0.05      # per decision at speed_cap, signed by speed toward the next gate
   speed_cap_kmh: 120      # above this the speed reward stops growing

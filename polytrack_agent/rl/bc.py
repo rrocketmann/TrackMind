@@ -18,6 +18,7 @@ import torch
 from torch import nn
 
 from polytrack_agent.rl.actions import n_actions
+from polytrack_agent.rl.line import ReferenceLine, reference_line
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.state import FEATURES, RECORDED_FEATURES, project_recorded
 
@@ -169,6 +170,31 @@ def load_demos(bc_cfg: dict, keys: list[str]) -> Demos:
         best_seconds=best,
         margin_s=margin,
     )
+
+
+def load_best_line(bc_cfg: dict) -> ReferenceLine:
+    """The single fastest clean lap on the track with the most finishes."""
+    root = archive_root(bc_cfg)
+    indexed = _index_rows(root)
+    track = _popular_track(indexed)
+    ranked = sorted(
+        (row for row in indexed if str(row["track"]) == track and row.get("seconds") is not None),
+        key=lambda row: float(row["seconds"]),
+    )
+    if not ranked:
+        raise ValueError(f"{track} has no timed laps in {root}")
+    for row in ranked:
+        lap = _load_lap(root, row)
+        if lap is None:
+            continue
+        try:
+            line = reference_line(list(lap.get("rows") or []), seconds=float(row["seconds"]), track=track)
+        except ValueError:
+            continue
+        if line.length > 1.0:
+            return line
+    best = float(ranked[0]["seconds"])
+    raise ValueError(f"No clean {track} lap to follow near {best:.3f}s in {root}")
 
 
 def behavior_clone(

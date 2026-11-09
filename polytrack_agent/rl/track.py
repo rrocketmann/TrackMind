@@ -290,6 +290,21 @@ class SchoolagyTrack:
         self.speed_drop_margin = _number(reward, "speed_drop_margin", 0.0)
         self.fail_penalty = _number(reward, "fail_penalty", 0.0)
         self.offtrack_penalty = _number(reward, "offtrack_penalty", 0.0)
+        # "chord" is the gate chord. "line" follows the best archived lap.
+        # "time" is the fine-tune once that lap is finished or nearly finished.
+        self.reward_stage = "chord"
+        self.line = None
+        self._cursor = 0
+        self._along = 0.0
+        self.line_scale = _number(reward, "line_scale", 4.0)
+        self.line_lateral = _number(reward, "line_lateral", 0.02)
+        self.line_lateral_cap = _number(reward, "line_lateral_cap", 12.0)
+        self.line_back_m = _number(reward, "line_back_m", 8.0)
+        self.line_forward_m = _number(reward, "line_forward_m", 40.0)
+        self.time_stage_penalty = _number(reward, "time_stage_penalty", 0.25)
+        self.time_stage_bonus = _number(reward, "time_stage_bonus", 20.0)
+        self.time_scale = _number(reward, "time_scale", 1.0)
+        self.time_line_scale = _number(reward, "time_line_scale", 1.0)
         self._state: dict = {}
         self._origin_y = 0.0
         self._origin_xz = (0.0, 0.0)
@@ -430,6 +445,8 @@ class SchoolagyTrack:
         self._last_xy = (float(state["position"]["x"]), float(state["position"]["z"]))
         self._pace = 0.0
         self._beached = False
+        self._cursor = 0
+        self._along = 0.0
         return {
             "state": state,
             "progress": 0.0,
@@ -453,15 +470,48 @@ class SchoolagyTrack:
         down = self._wheels_down(state)
         clearance = (state.get("border") or {}).get("clearance")
         on_track = down > 0 and (clearance is None or float(clearance) >= 0.0)
-        reward = -self.time_penalty * dt
-        if on_track:
-            reward += (progress - self._progress) * self.progress_scale
+        previous = self._progress
         self._progress = progress
+        reward = 0.0
+        line_progress = 0.0
+        line_lateral_m = 0.0
+        using_line = self.line is not None and self.reward_stage in ("line", "time")
+        if using_line:
+            position = state["position"]
+            along_m, line_lateral_m, cursor = self.line.project(
+                float(position["x"]),
+                float(position["z"]),
+                self._cursor,
+                self.line_back_m,
+                self.line_forward_m,
+            )
+            delta = along_m - self._along
+            # The cursor moves off the road too, so a jump is not paid on landing.
+            self._along = along_m
+            self._cursor = cursor
+            length = max(self.line.length, 1e-6)
+            line_progress = min(1.0, max(0.0, along_m / length))
+            near_line = line_lateral_m <= self.line_lateral_cap
+            if self.reward_stage == "line" and on_track:
+                # Far from the matched point is a jump the cursor has not reached.
+                # That advance is not paid, including when the cursor catches up later.
+                if near_line:
+                    reward += (delta / length) * self.line_scale
+                reward -= self.line_lateral * min(self.line_lateral_cap, line_lateral_m) * dt
+            elif self.reward_stage == "time":
+                reward -= self.time_stage_penalty * dt
+                if on_track and near_line:
+                    reward += (delta / length) * self.time_line_scale
+        else:
+            reward -= self.time_penalty * dt
+            if on_track:
+                reward += (progress - previous) * self.progress_scale
         # Speed toward the next gate pays on top of the chord, and only on the
-        # track. A sudden loss of chassis speed is a hit either way.
+        # track. The reference lap and the time fine-tune do not use it. A
+        # sudden loss of chassis speed is a hit either way.
         ground_kmh, along_kmh = self._motion_kmh(state)
         cap = max(1.0, self.speed_cap_kmh)
-        if on_track:
+        if on_track and not using_line:
             reward += self.speed_reward * min(cap, max(-cap, along_kmh)) / cap
         allowed = self.speed_drop_margin * dt
         lost = self._pace - ground_kmh
@@ -475,7 +525,12 @@ class SchoolagyTrack:
             self._flat = 0.0
         elif int(state["frames"]) >= 2000:
             self._flat += dt
-        if finished:
+        if finished and self.reward_stage == "time":
+            lap_s = int(state["finishFrames"]) * 0.001
+            reward += self.time_stage_bonus
+            if self.line is not None:
+                reward += self.time_scale * (float(self.line.seconds) - lap_s)
+        elif finished:
             reward += self.finish_bonus
         if clearance is not None and float(clearance) < 0.0:
             reward -= self.offtrack_penalty * dt
@@ -526,6 +581,18 @@ class SchoolagyTrack:
             # The teleport is not driving. Keep the score at the new place
             # without adding that jump to the reward.
             self._progress = progress
+            if self.line is not None and self.reward_stage in ("line", "time"):
+                landed = state["position"]
+                along_m, line_lateral_m, cursor = self.line.project(
+                    float(landed["x"]),
+                    float(landed["z"]),
+                    self._cursor,
+                    max(self._along, 0.0),
+                    15.0,
+                )
+                self._along = along_m
+                self._cursor = cursor
+                line_progress = min(1.0, max(0.0, along_m / max(self.line.length, 1e-6)))
             self._mark = progress
             self._flat = 0.0
             self._pace = self._motion_kmh(state)[0]
@@ -559,8 +626,20 @@ class SchoolagyTrack:
             "timeout": timed_out,
             "speed": speed,
             "ground_speed": ground,
+            "line_progress": line_progress,
+            "line_lateral": line_lateral_m,
+            "reward_stage": self.reward_stage,
         }
         return None, float(reward), done, info
+
+    def use_line(self, line, stage: str = "line") -> None:
+        """Follow one archived lap until the trainer sets the stage to time."""
+        if stage not in ("line", "time"):
+            raise ValueError(f"reward stage must be line or time, got {stage}")
+        self.line = line
+        self.reward_stage = stage
+        self._cursor = 0
+        self._along = 0.0
 
     def _reset_id(self) -> int:
         """The action id whose mask holds `reset`, or 0 when it is disabled."""

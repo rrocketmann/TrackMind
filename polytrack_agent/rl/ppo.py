@@ -58,15 +58,26 @@ def ppo_update(
     value_coef: float,
     unimix: float,
     update_policy: bool = True,
+    bc_observations: torch.Tensor | None = None,
+    bc_actions: torch.Tensor | None = None,
+    bc_coef: float = 0.0,
 ) -> dict[str, float]:
     """One PPO step. `update_policy=False` trains the critic and leaves the actor alone.
 
     AdamW skips a parameter with no gradient, so a value-only step does not
-    decay the cloned actor.
+    decay the cloned actor. `bc_coef` adds a clone loss on archived actions
+    for the early updates, while the actor is still learning the reference lap.
     """
     advantages = (advantages - advantages.mean()) / advantages.std().clamp_min(1e-8)
     count = int(actions.shape[0])
-    last_stats = {"loss": 0.0, "policy": 0.0, "value": 0.0, "entropy": 0.0}
+    last_stats = {"loss": 0.0, "policy": 0.0, "value": 0.0, "entropy": 0.0, "bc": 0.0}
+    clone = (
+        update_policy
+        and float(bc_coef) > 0.0
+        and bc_observations is not None
+        and bc_actions is not None
+        and int(bc_actions.shape[0]) > 0
+    )
     model.train()
     for _ in range(max(1, int(epochs))):
         order = torch.randperm(count, device=actions.device)
@@ -86,6 +97,16 @@ def ppo_update(
                     value_coef,
                     unimix,
                 )
+                if clone:
+                    pick = torch.randint(0, int(bc_actions.shape[0]), (int(batch.shape[0]),), device=actions.device)
+                    demo_logits, _demo_value = model(bc_observations[pick])
+                    bc_loss = nn.functional.cross_entropy(demo_logits, bc_actions[pick])
+                    loss = loss + float(bc_coef) * bc_loss
+                    last_stats = {
+                        **last_stats,
+                        "loss": float(loss.detach()),
+                        "bc": float(bc_loss.detach()),
+                    }
             else:
                 value_loss = (values - returns[batch]).pow(2).mean()
                 loss = float(value_coef) * value_loss
@@ -94,7 +115,9 @@ def ppo_update(
                     "policy": 0.0,
                     "value": float(value_loss.detach()),
                     "entropy": 0.0,
+                    "bc": 0.0,
                 }
+            last_stats.setdefault("bc", 0.0)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

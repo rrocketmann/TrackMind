@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Draw the live graphs for a specialist run.
 
-    python scripts/live.py --run runs/winter4
+    python scripts/live.py --run runs/winter4-follow
 
 The window tails that directory's episodes.csv and log.csv and redraws lap
-progress, lap time, update progress, and entropy. With no DISPLAY, the same
+progress, lap time, reference-lap fraction (or update progress), and entropy.
+With no DISPLAY, the same
 four panels are served on every network address of this machine, port 8765.
 A chase-camera video of a saved checkpoint is scripts/record.py, played in
 the local game.
@@ -89,12 +90,16 @@ def _paint(raw_line, mean_line, values: list[float], window: int) -> list[float]
 def _draw(run: Path, figure, axes, artists, panels) -> None:
     episodes = _rows(run / "episodes.csv")
     updates = _rows(run / "log.csv")
+    reference = bool(updates) and "line" in updates[0]
     series = (
         _column(episodes, "progress"),
         _column(episodes, "seconds"),
-        _column(updates, "progress"),
+        _column(updates, "line" if reference else "progress"),
         _column(updates, "entropy"),
     )
+    if reference:
+        axes[1, 0].set_title("Reference lap")
+        axes[1, 0].set_ylabel("fraction")
     latest = []
     for (axis, raw, mean), values, panel in zip(artists, series, panels):
         averaged = _paint(raw, mean, values, panel[3])
@@ -102,10 +107,11 @@ def _draw(run: Path, figure, axes, artists, panels) -> None:
         latest.append(averaged[-1] if averaged else float("nan"))
     entropy = latest[3]
     entropy_text = f"{entropy:.2f}" if entropy == entropy else "—"
-    figure.suptitle(
-        f"{len(episodes)} laps   {len(updates)} updates   entropy {entropy_text}",
-        fontsize=12,
-    )
+    stage = str(updates[-1].get("stage") or "") if updates else ""
+    title = f"{len(episodes)} laps   {len(updates)} updates   entropy {entropy_text}"
+    if stage:
+        title += f"   {stage}"
+    figure.suptitle(title, fontsize=12)
     return episodes, updates
 
 
@@ -248,7 +254,7 @@ def _serve(run: Path, host: str, port: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Live graphs for a specialist training run.")
-    parser.add_argument("--run", type=Path, default=Path("runs/winter4"))
+    parser.add_argument("--run", type=Path, default=Path("runs/winter4-follow"))
     parser.add_argument("--host", default="::", help="bind address; '::' is every IPv4 and IPv6 interface")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()

@@ -7,9 +7,10 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
-from polytrack_agent.rl.bc import behavior_clone, load_demos
+from polytrack_agent.rl.bc import behavior_clone, load_best_line, load_demos
 from polytrack_agent.rl.model import StateActorCritic
 from polytrack_agent.rl.state import NAMES, RECORDED, RECORDED_FEATURES, obs_dim
 
@@ -74,6 +75,69 @@ def test_warmstart_uses_fast_laps_on_the_popular_track(tmp_path: Path):
     assert demos.observations[1, len(NAMES) + 3] == 1.0
     assert float(demos.observations[0, len(NAMES) :].sum()) == 0.0
     assert float(demos.observations[2, len(NAMES) :].sum()) == 0.0
+
+
+def _at(action: int, x: float, z: float) -> dict:
+    recorded = [0.0] * RECORDED_FEATURES
+    recorded[RECORDED.index("x")] = x / 200.0
+    recorded[RECORDED.index("z")] = z / 200.0
+    return {"action": action, "n": recorded}
+
+
+def test_best_line_is_the_single_fastest_clean_lap(tmp_path: Path):
+    fast = _write_lap(tmp_path, "fast", [_at(3, 0.0, 0.0), _at(3, 10.0, 0.0)])
+    slow = _write_lap(tmp_path, "slow", [_at(3, 0.0, 0.0), _at(3, 80.0, 0.0)])
+    summer = _write_lap(tmp_path, "summer", [_at(3, 0.0, 0.0), _at(3, 5.0, 0.0)])
+    _index(
+        tmp_path,
+        [
+            {"track": "Winter 4", "file": fast, "seconds": 20.46, "game": "polytrack-0.6.3"},
+            {"track": "Winter 4", "file": slow, "seconds": 22.00, "game": "polytrack-0.6.3"},
+            {"track": "Summer 1", "file": summer, "seconds": 18.00, "game": "polytrack-0.6.3"},
+            {"track": "Summer 1", "file": summer, "seconds": 19.00, "game": "polytrack-0.6.3"},
+        ],
+    )
+    line = load_best_line({"root": str(tmp_path)})
+    assert line.track == "Winter 4"
+    assert line.seconds == pytest.approx(20.46)
+    assert line.length == pytest.approx(10.0)
+
+
+def test_clone_loss_raises_the_demo_action():
+    from polytrack_agent.rl.ppo import ppo_update
+
+    torch.manual_seed(0)
+    width = obs_dim(9)
+    model = StateActorCritic(width, 9, hidden=16)
+    observations = torch.zeros(8, width)
+    actions = torch.zeros(8, dtype=torch.int64)
+    zeros = torch.zeros(8)
+    demos = torch.zeros(32, width)
+    labels = torch.full((32,), 3, dtype=torch.int64)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.05)
+    before = torch.softmax(model(demos[:1])[0], dim=-1)[0, 3].item()
+    stats = ppo_update(
+        model,
+        optimizer,
+        observations,
+        actions,
+        zeros,
+        zeros,
+        zeros,
+        epochs=6,
+        minibatch_size=4,
+        clip=0.2,
+        entropy_coef=0.0,
+        value_coef=0.5,
+        unimix=0.0,
+        bc_observations=demos,
+        bc_actions=labels,
+        bc_coef=2.0,
+    )
+    after = torch.softmax(model(demos[:1])[0], dim=-1)[0, 3].item()
+    assert "bc" in stats
+    assert after > before
+    assert after > 0.5
 
 
 def test_behavior_clone_raises_the_labeled_chord():

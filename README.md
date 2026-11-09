@@ -52,11 +52,11 @@ node scripts/dump_parts.mjs "$POLYTRACK_ROOT" /path/to/track_parts.json
 ```bash
 python scripts/train.py
 python scripts/play.py --episodes 5
-python scripts/live.py --run runs/winter4
-python scripts/record.py --checkpoint runs/winter4/best.pt --out runs/winter4/best.mp4
+python scripts/live.py --run runs/winter4-follow
+python scripts/record.py --checkpoint runs/winter4-follow/best.pt --out runs/winter4-follow/best.mp4
 ```
 
-`scripts/train.py` clones the best TrackData laps, then runs PPO until a lap matches that time or you stop it. It writes `runs/winter4/last.pt`, `best.pt`, and `log.csv`. Play loads `runs/winter4/best.pt` and prints finish, time, progress, and checkpoints for each greedy episode. The fly-over run stays in `runs/ppo-reward`. The SAC runs stay in `runs/sac` and `runs/sac-blowup`. The older PPO run stays in `runs/summer1`.
+`scripts/train.py` clones the fastest TrackData laps for longer at the start, and the first PPO updates keep a clone loss. The reward then follows the single best lap. Once a car finishes that lap, or covers most of it, the reward switches to lap time. It writes `runs/winter4-follow/last.pt`, `best.pt`, and `log.csv`. Play loads that `best.pt`. The earlier on-track run, its graph, and its videos stay in `runs/winter4`. The fly-over run stays in `runs/ppo-reward`. The SAC runs stay in `runs/sac` and `runs/sac-blowup`. The older PPO run stays in `runs/summer1`.
 
 Training has not yet completed a lap. The env and the host are correct; the policy collapses onto the wrong action instead of holding throttle, which a constant action proves is worth far more. The measurements, what has been ruled out, and the plan are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md), under "the learner does not find the good action".
 
@@ -68,20 +68,20 @@ python scripts/train.py --stop-time 25
 
 Training saves `last.pt` and exits on the first lap at or below 25 s. The same field is `rl.stop_time` in a config overlay.
 
-`scripts/play.py --episodes 5` loads `runs/winter4/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
+`scripts/play.py --episodes 5` loads `runs/winter4-follow/best.pt` and prints finish, lap time, progress, and checkpoints for each greedy episode.
 
 ## Watch a run
 
 `scripts/live.py` opens the graphs. It tails `episodes.csv` and `log.csv` in the run directory and redraws four panels once a second: lap progress, lap time, update progress, and entropy. Training does not open this window.
 
 ```bash
-python scripts/live.py --run runs/winter4
+python scripts/live.py --run runs/winter4-follow
 ```
 
 `scripts/record.py` writes a chase-camera mp4 of a saved checkpoint. The drive is greedy. It is a fresh playback of the weights, not the stochastic episode that produced the checkpoint. The picture is the local checkout in `POLYTRACK_ROOT`, served on 127.0.0.1. Every other request is blocked. The script does not open an external page and does not submit a time.
 
 ```bash
-python scripts/record.py --checkpoint runs/winter4/best.pt --out runs/winter4/best.mp4
+python scripts/record.py --checkpoint runs/winter4-follow/best.pt --out runs/winter4-follow/best.mp4
 ```
 
 The game clock follows the display frame rate and does not catch up, so the recording needs `DISPLAY` and a GPU that holds about 60 fps. The script stops when the game renders under 25 fps. A virtual framebuffer is too slow. This machine's ffmpeg has no libx264, so the file is encoded with libopenh264. `runs/winter4-live/best.mp4` is one such recording. The browser half is `scripts/record_game.mjs`. The old `scripts/record.mjs`, which opened an external page, is gone.
@@ -104,8 +104,11 @@ The game clock follows the display frame rate and does not catch up, so the reco
 | `rl.group_size` | laps collected before one PPO update |
 | `rl.workers` | physics processes stepped together. Empty uses one per performance core, capped at the lap group |
 | `rl.out_dir` | checkpoint directory |
-| `reward.progress_scale` | pay per gate of forward travel along the chord |
-| `reward.speed_reward` / `speed_cap_kmh` | pay per decision for speed toward the next gate, and where that pay stops growing |
+| `reward.line_scale` / `line_lateral` | pay for advance along the best archived lap, and the per-metre cost of leaving it |
+| `reward.line_close` | fraction of that lap that switches the reward to lap time |
+| `reward.time_stage_penalty` / `time_stage_bonus` / `time_scale` | per-second cost, finish bonus, and pay per second faster than the reference lap |
+| `reward.progress_scale` | fallback pay per gate of forward travel along the chord, when no reference lap is loaded |
+| `reward.speed_reward` / `speed_cap_kmh` | fallback pay per decision for speed toward the next gate, and where that pay stops growing |
 | `reward.speed_drop_penalty` / `speed_drop_margin` | cost for a sudden loss of chassis speed, and the km/h per second that is still free |
 | `reward.time_penalty` / `finish_bonus` | optional per-second time cost, finish bonus |
 | `reward.fail_penalty` / `offtrack_penalty` | optional one cost for a failed episode, optional per-second cost past the road edge |
