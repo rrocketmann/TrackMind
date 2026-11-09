@@ -153,10 +153,6 @@ def set_entropy(
         return at(sharp)
 
 
-# How far one update may reel entropy toward the schedule, in nats.
-_ENTROPY_REEL = 0.15
-
-
 def hold_entropy(
     model: StateActorCritic,
     observations: torch.Tensor,
@@ -166,7 +162,7 @@ def hold_entropy(
     band: float,
     floor: float,
 ) -> float:
-    """Leave entropy alone inside a band. Outside it, step at most 0.15 nats toward the edge.
+    """Leave entropy alone inside a band. Outside it, set it to the near edge.
 
     `hold_entropy.scale` is the logit multiplier that was applied. 1 means the
     weights were left as they were.
@@ -179,8 +175,7 @@ def hold_entropy(
         hold_entropy.scale = 1.0
         return measured
     edge = low if measured < low else high
-    delta = min(_ENTROPY_REEL, max(-_ENTROPY_REEL, edge - measured))
-    landed = set_entropy(model, observations, unimix, measured + delta)
+    landed = set_entropy(model, observations, unimix, edge)
     hold_entropy.scale = float(getattr(set_entropy, "scale", 1.0))
     return landed
 

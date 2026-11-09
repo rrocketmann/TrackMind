@@ -324,11 +324,21 @@ def train_ppo(
     entropy_target = None if resumed_pair is None else resumed_pair[1]
     entropy_cfg = dict(rl_cfg.get("entropy") or {})
     entropy_bump = float(0.5 if entropy_cfg.get("bump") is None else entropy_cfg.get("bump"))
-    entropy_drop = float(0.003 if entropy_cfg.get("drop") is None else entropy_cfg.get("drop"))
+    entropy_drop = float(0 if entropy_cfg.get("drop") is None else entropy_cfg.get("drop"))
     entropy_floor = float(0.08 if entropy_cfg.get("floor") is None else entropy_cfg.get("floor"))
     entropy_wobble = float(0.04 if entropy_cfg.get("wobble") is None else entropy_cfg.get("wobble"))
     if resumed:
         demos = None
+        if entropy_drop == 0:
+            log.info("Entropy held at %.3f, wobble %.3f.", float(entropy_target), entropy_wobble)
+        else:
+            log.info(
+                "Entropy target %.3f, down %.4f each update, wobble %.3f, floor %.3f.",
+                float(entropy_target),
+                entropy_drop,
+                entropy_wobble,
+                entropy_floor,
+            )
     elif demos is not None:
         stats = behavior_clone(
             model,

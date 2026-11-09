@@ -41,7 +41,7 @@ rl:
   entropy_coef: 0         # sharpness is the schedule below, not a bonus inside PPO
   entropy:
     bump: 0.5             # one lift, applied on the first update of a run
-    drop: 0.003           # subtracted from the entropy target every update
+    drop: 0               # the target stays put
     wobble: 0.04          # PPO may leave entropy this far from the target
     floor: 0.08
   unimix: 0.01
@@ -67,7 +67,9 @@ play:
 
 reward:
   # The score is forward travel along the chord to the next gate, plus speed
-  # toward that gate. Any forward motion counts. A sudden loss of speed is a hit.
+  # toward that gate. Both are paid only while a wheel is on the road and the
+  # car is inside the road edge. A jump off the track does not score. A sudden
+  # loss of speed is a hit.
   progress_scale: 1.0     # forward chord progress pays this much per gate; backward costs it
   speed_reward: 0.05      # per decision at speed_cap, signed by speed toward the next gate
   speed_cap_kmh: 120      # above this the speed reward stops growing

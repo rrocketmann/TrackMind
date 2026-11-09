@@ -446,16 +446,23 @@ class SchoolagyTrack:
         dt = max(0.0, (int(state["frames"]) - int(before["frames"])) * 0.001)
         finished = state["finishFrames"] is not None
         progress = self._progress_of(state, finished)
-        # The score is the change in progress along the chord to the next gate.
-        # Time is charged per second, so a finer action repeat cannot farm it
-        # and a 90 s wander is not free.
-        reward = (progress - self._progress) * self.progress_scale - self.time_penalty * dt
+        # Wheel contact plus the road edge is "on the track". A car in the air
+        # or past the edge can still project onto the chord, and that projection
+        # must not pay. The baseline still advances, so landing does not collect
+        # the jump afterwards.
+        down = self._wheels_down(state)
+        clearance = (state.get("border") or {}).get("clearance")
+        on_track = down > 0 and (clearance is None or float(clearance) >= 0.0)
+        reward = -self.time_penalty * dt
+        if on_track:
+            reward += (progress - self._progress) * self.progress_scale
         self._progress = progress
-        # Forward travel along the chord is the score above. Speed toward the
-        # next gate pays on top of that. A sudden loss of chassis speed is a hit.
+        # Speed toward the next gate pays on top of the chord, and only on the
+        # track. A sudden loss of chassis speed is a hit either way.
         ground_kmh, along_kmh = self._motion_kmh(state)
         cap = max(1.0, self.speed_cap_kmh)
-        reward += self.speed_reward * min(cap, max(-cap, along_kmh)) / cap
+        if on_track:
+            reward += self.speed_reward * min(cap, max(-cap, along_kmh)) / cap
         allowed = self.speed_drop_margin * dt
         lost = self._pace - ground_kmh
         if lost > allowed:
@@ -470,20 +477,18 @@ class SchoolagyTrack:
             self._flat += dt
         if finished:
             reward += self.finish_bonus
-        clearance = (state.get("border") or {}).get("clearance")
         if clearance is not None and float(clearance) < 0.0:
             reward -= self.offtrack_penalty * dt
         # Wheel contact is the authoritative "is the car on the track" signal. A
         # car that leaves the road lands on its chassis with every wheel in the
         # air and cannot be driven again, so staying on the surface has to pay.
-        down = self._wheels_down(state)
         moved = self._moved(state)
         # A fixed distance threshold misfires at small `action_repeat`: a car at
         # 28 km/h covers only ~0.08 units in a 10-frame step, so it looked parked.
         # Scale the floor by the step's own duration instead.
         floor = max(0.02, 5.0 * dt / 3.6)  # 5 km/h over this step, in metres
         self._airborne_s = self._airborne_s + dt if down == 0 else 0.0
-        if down > 0 and moved > 0.0 and not finished:
+        if on_track and moved > 0.0 and not finished:
             # Pay only for wheels on the road *and* the car actually going
             # somewhere. Paying for contact alone let the policy park on the
             # grid and farm the reward instead of driving.
@@ -502,7 +507,7 @@ class SchoolagyTrack:
         self._slow = 0.0 if (not creeping and ground > 3.0) or int(state["frames"]) < 2000 else self._slow + dt
         # Sitting on the road without going anywhere must cost, or the policy
         # learns that the safest way to never leave the road is to never drive.
-        if down > 0 and moved < floor and not finished:
+        if on_track and moved < floor and not finished:
             reward += self.stall_penalty
         fell = float(state["position"]["y"]) < self._origin_y - 8.0
         timed_out = int(state["frames"]) * 0.001 >= self.timeout_s

@@ -326,8 +326,8 @@ def test_entropy_wobble_keeps_a_near_miss_and_catches_a_far_one():
         model.policy.bias.zero_()
         model.policy.bias[0] = 8.0
     caught = hold_entropy(model, observations, 0.0, 0.05, 0.90, 0.04, 0.08)
-    # One update reels at most 0.15 nats toward the band. 0.05 moves to 0.20.
-    assert caught == pytest.approx(0.20, abs=0.03)
+    # Outside the band, entropy is set to the near edge. 0.90 minus 0.04 is 0.86.
+    assert caught == pytest.approx(0.86, abs=0.03)
     assert hold_entropy.scale != pytest.approx(1.0)
 
 
@@ -1116,6 +1116,90 @@ def _quiet_reward(**overrides):
     cfg["reward"]["offtrack_penalty"] = 0.0
     cfg["reward"].update(overrides)
     return cfg
+
+
+class _ContactClient:
+    """Scripted position, speed, and which wheels are touching the road."""
+
+    def __init__(self, samples: list[dict]):
+        self.samples = list(samples)
+        self.checkpoint_count = 2
+        self.parts = []
+        self.frames = 0
+        self.i = 0
+
+    def reset(self) -> dict:
+        self.frames = 0
+        self.i = 0
+        return self._state()
+
+    def step(self, controls: dict, frames: int) -> dict:
+        del controls
+        self.frames = int(frames)
+        self.i += 1
+        return self._state()
+
+    def _state(self) -> dict:
+        sample = self.samples[min(self.i, len(self.samples) - 1)]
+        x = float(sample.get("x") or 0.0)
+        z = float(sample.get("z") or 0.0)
+        speed = float(sample.get("speed") or 0.0)
+        wheels = sample.get("wheels")
+        if wheels is None:
+            wheels = [True, True, True, True]
+        return {
+            "frames": self.frames,
+            "speedKmh": abs(speed) * 3.6,
+            "velocity": {"x": speed, "y": 0.0, "z": 0.0},
+            "finishFrames": None,
+            "nextCheckpointIndex": 0,
+            "position": {"x": x, "y": 0.0, "z": z},
+            "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            "wheels": list(wheels),
+        }
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_jump_off_the_track_does_not_score_and_is_not_paid_on_landing():
+    airborne = {"x": 4.0, "speed": 20.0, "wheels": [False, False, False, False]}
+    landed = {"x": 8.0, "speed": 20.0, "wheels": [True, True, True, True]}
+    cfg = _quiet_reward(progress_scale=1.0, speed_reward=1.0, speed_cap_kmh=90.0)
+    env = make_track(cfg, client=_ContactClient([{"x": 0.0}, airborne, landed]))
+    try:
+        env.reset()
+        env.gates = [(40.0, 0.0, 0.0)]
+        env.finish = (80.0, 0.0, 0.0)
+        forward = forward_ids(env.keys)[0]
+        _frame, flying, _done, info = env.step(forward)
+        assert info["progress"] == pytest.approx(0.1)
+        assert info["wheels_down"] == 0
+        assert flying == pytest.approx(0.0)
+        _frame, reward, _done, info = env.step(forward)
+        assert info["wheels_down"] == 4
+        # The airborne 4 m were not banked. Only the next 4 m on the road pay.
+        assert info["progress"] == pytest.approx(0.2)
+        assert reward == pytest.approx(0.1 + 20.0 * 3.6 / 90.0)
+    finally:
+        env.close()
+
+
+def test_speed_past_the_road_edge_does_not_pay():
+    cfg = _quiet_reward(speed_reward=1.0, speed_cap_kmh=90.0)
+    # Three road cells along x. z=4 is past the edge of that strip.
+    cfg_client_parts = [[0, 0, 0, 0, 0, 0, -1], [1, 0, 0, 0, 0, 0, -1], [2, 0, 0, 0, 0, 0, -1]]
+    client = _ContactClient([{"x": 5.0, "z": 4.0, "speed": 25.0}])
+    client.parts = cfg_client_parts
+    env = make_track(cfg, client=client)
+    try:
+        env.reset()
+        forward = forward_ids(env.keys)[0]
+        _frame, reward, _done, info = env.step(forward)
+        assert info["wheels_down"] == 4
+        assert reward == pytest.approx(0.0)
+    finally:
+        env.close()
 
 
 def test_forward_motion_along_the_chord_is_rewarded():
