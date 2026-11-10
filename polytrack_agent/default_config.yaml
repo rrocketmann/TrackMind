@@ -43,11 +43,9 @@ rl:
   value_coef: 0.5
   entropy_coef: 0         # sharpness is the schedule below, not a bonus inside PPO
   entropy:
-    target: 0.6           # held here when drop is 0, including a fresh run
-    bump: 0.5             # one lift on the first update, only when drop is above 0
-    drop: 0               # the target stays put
+    target: 0.6           # at the start line. Falls toward floor as the lap fills in.
     wobble: 0.04          # PPO may leave entropy this far from the target
-    floor: 0.08
+    floor: 0.08           # once the car has covered a full lap
   unimix: 0.01
   group_size: 4          # laps collected before one PPO update
   workers: null          # null: one physics process per performance core, each pinned to its own core

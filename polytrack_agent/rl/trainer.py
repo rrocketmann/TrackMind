@@ -21,7 +21,13 @@ from polytrack_agent.rl.checkpoint import ARCH, read_checkpoint, save_checkpoint
 from polytrack_agent.rl.device import configure_torch
 from polytrack_agent.rl.gae import compute_gae
 from polytrack_agent.rl.model import StateActorCritic
-from polytrack_agent.rl.ppo import clear_policy_moments, hold_entropy, ppo_update, set_entropy
+from polytrack_agent.rl.ppo import (
+    clear_policy_moments,
+    entropy_for_progress,
+    hold_entropy,
+    ppo_update,
+    set_entropy,
+)
 from polytrack_agent.rl.seed import set_seed
 from polytrack_agent.rl.state import LapNumbers, obs_dim
 
@@ -117,6 +123,27 @@ def _resume(
     stage = None if raw_stage is None else str(raw_stage)
     log.info("Resumed %s from update %s", path, update)
     return update, target, stage
+
+
+def _best_lap_fraction(path: Path) -> float:
+    """Highest reference-lap fraction already logged, else 0.
+
+    The entropy target follows this, so a resumed run keeps the progress it
+    has already earned instead of climbing back to the start-line target.
+    """
+    if not path.is_file():
+        return 0.0
+    best = 0.0
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                raw = row.get("line")
+                if raw in (None, ""):
+                    continue
+                best = max(best, float(raw))
+    except (OSError, ValueError):
+        return 0.0
+    return best
 
 
 def _begin(env: SchoolagyTrack, numbers: LapNumbers) -> None:
@@ -354,22 +381,21 @@ def train_ppo(
     entropy_target = None if resumed_pair is None else resumed_pair[1]
     resumed_stage = None if resumed_pair is None else resumed_pair[2]
     entropy_cfg = dict(rl_cfg.get("entropy") or {})
-    entropy_bump = float(0.5 if entropy_cfg.get("bump") is None else entropy_cfg.get("bump"))
-    entropy_drop = float(0 if entropy_cfg.get("drop") is None else entropy_cfg.get("drop"))
+    entropy_start = float(0.6 if entropy_cfg.get("target") is None else entropy_cfg.get("target"))
     entropy_floor = float(0.08 if entropy_cfg.get("floor") is None else entropy_cfg.get("floor"))
     entropy_wobble = float(0.04 if entropy_cfg.get("wobble") is None else entropy_cfg.get("wobble"))
+    # The best fraction already on disk. A new lap can only lower the target.
+    entropy_mark = _best_lap_fraction(out_dir / "log.csv")
+    entropy_target = entropy_for_progress(entropy_mark, entropy_start, entropy_floor)
+    log.info(
+        "Entropy %.3f at lap fraction %.3f, falling to %.3f at a full lap, wobble %.3f.",
+        float(entropy_target),
+        float(entropy_mark),
+        float(entropy_floor),
+        entropy_wobble,
+    )
     if resumed:
         demos = None
-        if entropy_drop == 0:
-            log.info("Entropy held at %.3f, wobble %.3f.", float(entropy_target), entropy_wobble)
-        else:
-            log.info(
-                "Entropy target %.3f, down %.4f each update, wobble %.3f, floor %.3f.",
-                float(entropy_target),
-                entropy_drop,
-                entropy_wobble,
-                entropy_floor,
-            )
     elif demos is not None:
         stats = behavior_clone(
             model,
@@ -552,7 +578,7 @@ def train_ppo(
         return progress > best_progress
 
     def flush() -> None:
-        nonlocal updates, best_progress, best_line, best_seconds, current_return, current_length, entropy_target, critic_ready
+        nonlocal updates, best_progress, best_line, best_seconds, current_return, current_length, entropy_target, entropy_mark, critic_ready
         lengths = list(episode_lengths)
         returns_ep = list(episode_returns)
         ends = list(episode_ends)
@@ -587,25 +613,20 @@ def train_ppo(
             bc_coef=bc_coef if critic_ready and reward_stage == "line" and updates < bc_updates else 0.0,
         )
         measured = float(stats["entropy"])
-        if not critic_ready or entropy_target is None:
-            if entropy_drop == 0:
-                raw_target = entropy_cfg.get("target")
-                entropy_target = 0.6 if raw_target is None else float(raw_target)
-                log.info("Entropy held at %.3f, wobble %.3f.", float(entropy_target), entropy_wobble)
+        fraction = 0.0
+        if ends:
+            if reward_stage in ("line", "time"):
+                fraction = float(np.mean([float(item[2]) for item in ends]))
             else:
-                entropy_target = measured + entropy_bump
-                log.info(
-                    "Entropy bump from %.3f to %.3f, then down %.4f each update, wobbling by %.3f.",
-                    measured,
-                    entropy_target,
-                    entropy_drop,
-                    entropy_wobble,
-                )
+                count = int(getattr(getattr(env, "client", None), "checkpoint_count", 0) or 0)
+                fraction = float(np.mean([float(item[0]) for item in ends])) / (float(count) + 1.0)
+        entropy_mark = max(float(entropy_mark), max(0.0, fraction))
+        entropy_target = entropy_for_progress(entropy_mark, entropy_start, entropy_floor)
+        if not critic_ready:
             stats["entropy"] = set_entropy(model, observations, unimix, entropy_target)
             clear_policy_moments(optimizer, model)
             critic_ready = True
         else:
-            entropy_target = max(entropy_floor, entropy_target - entropy_drop)
             held = hold_entropy(
                 model,
                 observations,

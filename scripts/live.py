@@ -5,8 +5,9 @@
 
 The window tails that directory's episodes.csv and log.csv and redraws lap
 progress, lap time, reference-lap fraction (or update progress), and entropy.
-With no DISPLAY, the same
-four panels are served on every network address of this machine, port 8765.
+Each panel opens on the latest points, scaled to that stretch, and scrolls
+back through the rest. With no DISPLAY, the page is served on every network
+address of this machine, port 8765.
 A chase-camera video of a saved checkpoint is scripts/record.py, played in
 the local game.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import os
 import socket
@@ -67,15 +69,19 @@ def _mean(values: list[float], window: int) -> list[float]:
     return averaged
 
 
-def _fit(axis, values: list[float]) -> None:
-    finite = [value for value in values if value == value]
+def _fit(axis, values: list[float], span: int) -> None:
+    """Scale the saved image to the latest points. The page can scroll further back."""
     count = len(values)
-    if count == 0 or not finite:
+    if count == 0:
+        return
+    start = max(0, count - max(1, int(span)))
+    finite = [value for value in values[start:] if value == value]
+    if not finite:
         return
     low = min(finite)
     high = max(finite)
     pad = (high - low) * 0.15 or 0.05
-    axis.set_xlim(0.5, count + 0.5)
+    axis.set_xlim(start + 0.5, count + 0.5)
     axis.set_ylim(low - pad, high + pad)
 
 
@@ -103,7 +109,7 @@ def _draw(run: Path, figure, axes, artists, panels) -> None:
     latest = []
     for (axis, raw, mean), values, panel in zip(artists, series, panels):
         averaged = _paint(raw, mean, values, panel[3])
-        _fit(axis, averaged)
+        _fit(axis, averaged, panel[4])
         latest.append(averaged[-1] if averaged else float("nan"))
     entropy = latest[3]
     entropy_text = f"{entropy:.2f}" if entropy == entropy else "—"
@@ -121,13 +127,13 @@ def _build(run: Path):
     if manager is not None and hasattr(manager, "set_window_title"):
         manager.set_window_title(run.name)
     panels = (
-        (axes[0, 0], "Lap progress", "#1f4b99", 12),
-        (axes[0, 1], "Lap time", "#0b6e4f", 12),
-        (axes[1, 0], "Update progress", "#9a3412", 5),
-        (axes[1, 1], "Entropy", "#1d4e89", 5),
+        (axes[0, 0], "Lap progress", "#1f4b99", 12, 100),
+        (axes[0, 1], "Lap time", "#0b6e4f", 12, 100),
+        (axes[1, 0], "Update progress", "#9a3412", 5, 80),
+        (axes[1, 1], "Entropy", "#1d4e89", 5, 80),
     )
     artists = []
-    for axis, title, color, _window in panels:
+    for axis, title, color, _window, _span in panels:
         raw, = axis.plot([], [], color=color, linewidth=1.0, alpha=0.28)
         mean, = axis.plot([], [], color=color, linewidth=2.2)
         axis.set_title(title)
@@ -191,26 +197,218 @@ def _graph_urls(port: int) -> list[str]:
     return urls
 
 
+def _number(value: float) -> float | None:
+    if value != value:
+        return None
+    return round(float(value), 4)
+
+
+def _payload(run: Path) -> dict:
+    """Full series for the page. `span` is how many recent points open in view."""
+    episodes = _rows(run / "episodes.csv")
+    updates = _rows(run / "log.csv")
+    reference = bool(updates) and "line" in updates[0]
+    specs = (
+        ("Lap progress", "lap", "progress", "#1f4b99", 100, 12, _column(episodes, "progress")),
+        ("Lap time", "lap", "seconds", "#0b6e4f", 100, 12, _column(episodes, "seconds")),
+        (
+            "Reference lap" if reference else "Update progress",
+            "update",
+            "fraction" if reference else "progress",
+            "#9a3412",
+            80,
+            5,
+            _column(updates, "line" if reference else "progress"),
+        ),
+        ("Entropy", "update", "entropy", "#1d4e89", 80, 5, _column(updates, "entropy")),
+    )
+    panels = []
+    for title, xlabel, ylabel, color, span, smooth, values in specs:
+        panels.append(
+            {
+                "title": title,
+                "xlabel": xlabel,
+                "ylabel": ylabel,
+                "color": color,
+                "span": span,
+                "y": [_number(value) for value in values],
+                "mean": [_number(value) for value in _mean(values, smooth)],
+            }
+        )
+    entropy = panels[3]["mean"][-1] if panels[3]["mean"] else None
+    return {
+        "run": str(run),
+        "episodes": len(episodes),
+        "updates": len(updates),
+        "stage": str(updates[-1].get("stage") or "") if updates else "",
+        "entropy": entropy,
+        "panels": panels,
+    }
+
+
+_PAGE = """<!doctype html>
+<meta charset=utf-8>
+<title>__TITLE__</title>
+<style>
+  body { margin: 0; background: #111; color: #eee; font: 14px sans-serif; }
+  header { padding: 10px 16px 0; }
+  p { margin: 4px 0 0; color: #aaa; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; }
+  article { background: #fff; color: #222; border-radius: 8px; padding: 8px 10px 10px; }
+  h2 { margin: 0 0 4px; font-size: 14px; }
+  canvas { width: 100%; height: 220px; display: block; touch-action: none; }
+  label { display: flex; gap: 8px; align-items: center; color: #555; font-size: 12px; }
+  input[type=range] { flex: 1; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+</style>
+<header>
+  <strong id=meta>loading</strong>
+  <p>Each graph opens on the latest points. Scroll a bar, or the wheel, to look further back.</p>
+</header>
+<main id=grid></main>
+<script>
+const charts = [];
+function finite(values) {
+  return values.filter((value) => value != null && value === value);
+}
+function draw(chart) {
+  const panel = chart.panel;
+  const canvas = chart.canvas;
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  canvas.width = Math.max(1, Math.floor(width * dpr));
+  canvas.height = Math.max(1, Math.floor(height * dpr));
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const count = panel.y.length;
+  const span = count === 0 ? 1 : Math.min(panel.span, count);
+  const end = count === 0 ? 0 : Math.min(count, Math.max(span, chart.end || count));
+  const start = Math.max(0, end - span);
+  const left = 48, right = 12, top = 12, bottom = 26;
+  const plotW = Math.max(1, width - left - right);
+  const plotH = Math.max(1, height - top - bottom);
+  ctx.strokeStyle = "#e4e4e4";
+  ctx.strokeRect(left, top, plotW, plotH);
+  chart.caption.textContent = count
+    ? panel.xlabel + " " + (start + 1) + "–" + end + " of " + count
+    : "no points yet";
+  if (!count) return;
+  const sliceY = panel.y.slice(start, end);
+  const sliceM = panel.mean.slice(start, end);
+  const vals = finite(sliceY.concat(sliceM));
+  if (!vals.length) return;
+  let low = Math.min.apply(null, vals);
+  let high = Math.max.apply(null, vals);
+  const pad = (high - low) * 0.15 || 0.05;
+  low -= pad;
+  high += pad;
+  const xOf = (index) => left + ((index - start) / Math.max(1, end - start - 1)) * plotW;
+  const yOf = (value) => top + (1 - (value - low) / (high - low)) * plotH;
+  ctx.font = "11px sans-serif";
+  ctx.fillStyle = "#666";
+  ctx.textAlign = "right";
+  ctx.fillText(high.toFixed(2), left - 6, top + 10);
+  ctx.fillText(low.toFixed(2), left - 6, top + plotH);
+  ctx.textAlign = "left";
+  ctx.fillText(panel.ylabel, left + 6, top + 12);
+  function stroke(series, alpha, widthPx) {
+    ctx.beginPath();
+    let moved = false;
+    series.forEach((value, index) => {
+      if (value == null || value !== value) { moved = false; return; }
+      const x = xOf(start + index);
+      const y = yOf(value);
+      if (!moved) { ctx.moveTo(x, y); moved = true; }
+      else ctx.lineTo(x, y);
+    });
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = panel.color;
+    ctx.lineWidth = widthPx;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  stroke(sliceY, 0.35, 1.2);
+  stroke(sliceM, 1, 2.3);
+}
+function build(panel) {
+  const article = document.createElement("article");
+  const title = document.createElement("h2");
+  title.textContent = panel.title;
+  const canvas = document.createElement("canvas");
+  const label = document.createElement("label");
+  const caption = document.createElement("span");
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = "1";
+  range.value = "1";
+  label.append(range, caption);
+  article.append(title, canvas, label);
+  document.getElementById("grid").append(article);
+  const chart = { panel, canvas, range, caption, end: null, count: 0 };
+  range.addEventListener("input", () => {
+    chart.end = Number(range.value);
+    draw(chart);
+  });
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const span = chart.count === 0 ? 1 : Math.min(chart.panel.span, chart.count);
+    const step = Math.max(1, Math.round(span / 8));
+    const next = (chart.end || chart.count) + (event.deltaY > 0 ? -step : step);
+    chart.end = Math.max(span, Math.min(chart.count || span, next));
+    range.value = String(chart.end);
+    draw(chart);
+  }, { passive: false });
+  charts.push(chart);
+}
+async function tick() {
+  const data = await fetch("/data.json", { cache: "no-store" }).then((response) => response.json());
+  const entropy = data.entropy == null ? "—" : Number(data.entropy).toFixed(2);
+  document.getElementById("meta").textContent =
+    data.episodes + " laps   " + data.updates + " updates   entropy " + entropy +
+    (data.stage ? "   " + data.stage : "");
+  if (!charts.length) data.panels.forEach(build);
+  data.panels.forEach((panel, index) => {
+    const chart = charts[index];
+    const follow = chart.end == null || chart.end >= chart.count;
+    chart.panel = panel;
+    chart.count = panel.y.length;
+    const span = chart.count === 0 ? 1 : Math.min(panel.span, chart.count);
+    chart.range.min = String(span);
+    chart.range.max = String(Math.max(chart.count, span));
+    chart.range.disabled = chart.count <= span;
+    if (follow) chart.end = chart.count || span;
+    chart.range.value = String(chart.end);
+    draw(chart);
+  });
+}
+tick();
+setInterval(tick, 1000);
+window.addEventListener("resize", () => charts.forEach(draw));
+</script>
+"""
+
+
+def _page(run: Path) -> bytes:
+    title = html.escape(run.name)
+    return _PAGE.replace("__TITLE__", title).encode()
+
+
 def _serve(run: Path, host: str, port: int) -> None:
-    """Redraw the four panels once a second and serve the PNG."""
+    """Redraw the four panels once a second and serve a scrollable page."""
     figure, axes, artists, panels = _build(run)
     png = run / "live.png"
-    page = (
-        "<!doctype html><meta charset=utf-8>"
-        "<title>Winter 4 training</title>"
-        "<style>body{margin:0;background:#111;color:#eee;font:14px sans-serif}"
-        "img{width:100%;height:auto;background:#fff}</style>"
-        f"<p style='padding:8px 12px'>{run}</p>"
-        "<img id=g alt='training graphs'>"
-        "<script>const g=document.getElementById('g');"
-        "function tick(){g.src='/live.png?t='+Date.now()} tick(); setInterval(tick,1000)</script>"
-    ).encode()
+    page = _page(run)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
                 body, kind = page, "text/html; charset=utf-8"
+            elif path == "/data.json":
+                body = json.dumps(_payload(run), allow_nan=False).encode()
+                kind = "application/json"
             elif path == "/live.png":
                 body, kind = png.read_bytes() if png.is_file() else b"", "image/png"
             else:

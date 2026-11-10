@@ -1,0 +1,15 @@
+RECORD lap-01
+blocked GET https://www.googletagmanager.com/gtag/js?id=G-TE23LLQE9F
+blocked GET https://polytrack-backend.htmlunblockedgames.workers.dev/user?version=0.5.2&userToken=fbaf7f9933fe4c50150f80b26572b2aa68682415cd2df67f029ac35ea17bdf44
+game is rendering at 16 fps, the lap would not play in real time
+DevTools listening on ws://127.0.0.1:36817/devtools/browser/5044106e-7b23-459d-9713-7b12f08517b1
+MESA: info: vulkan: No DRI3 support detected - required for presentation
+Note: you can probably enable DRI3 in your Xorg config
+MESA: info: vulkan: No DRI3 support detected - required for presentation
+Note: you can probably enable DRI3 in your Xorg config
+[2159956:2159956:1109/154349.790131:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.NetworkManager.GetDevices: object_path= /org/freedesktop/NetworkManager: org.freedesktop.DBus.Error.ServiceUnknown: The name org.freedesktop.NetworkManager was not provided by any .service files
+[2159987:2159987:1109/154352.413398:ERROR:gpu/command_buffer/service/gl_utils.cc:431] [.WebGL-0x36ac00446e00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels
+[2159987:2159987:1109/154352.520509:ERROR:gpu/command_buffer/service/gl_utils.cc:431] [.WebGL-0x36ac00446e00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels
+[2159987:2159987:1109/154352.612319:ERROR:gpu/command_buffer/service/gl_utils.cc:431] [.WebGL-0x36ac00446e00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels
+[2159987:2159987:1109/154352.709512:ERROR:gpu/command_buffer/service/gl_utils.cc:431] [.WebGL-0x36ac00446e00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)
+[2159956:2159974:1109/154355.366786:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT

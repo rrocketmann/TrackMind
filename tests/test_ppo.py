@@ -309,6 +309,16 @@ def test_entropy_can_be_raised_and_then_lowered():
     assert lowered == pytest.approx(raised - 0.2, abs=0.03)
 
 
+def test_entropy_falls_in_a_line_with_lap_progress():
+    from polytrack_agent.rl.ppo import entropy_for_progress
+
+    assert entropy_for_progress(0.0, 0.6, 0.08) == pytest.approx(0.6)
+    assert entropy_for_progress(0.5, 0.6, 0.08) == pytest.approx(0.34)
+    assert entropy_for_progress(1.0, 0.6, 0.08) == pytest.approx(0.08)
+    assert entropy_for_progress(1.4, 0.6, 0.08) == pytest.approx(0.08)
+    assert entropy_for_progress(-0.2, 0.6, 0.08) == pytest.approx(0.6)
+
+
 def test_entropy_wobble_keeps_a_near_miss_and_catches_a_far_one():
     from polytrack_agent.rl.ppo import hold_entropy
 

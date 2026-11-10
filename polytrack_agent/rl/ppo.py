@@ -133,6 +133,19 @@ def _entropy(model: StateActorCritic, observations: torch.Tensor, unimix: float)
     return float(Categorical(logits=mix_logits(logits, unimix)).entropy().mean())
 
 
+def entropy_for_progress(progress: float, start: float, floor: float) -> float:
+    """Entropy falls in a straight line from `start` to `floor` as a lap fills in.
+
+    `progress` is how much of the lap is already covered: 0 at the start, 1 at
+    the finish. Trackmania anneals exploration the same way, off race progress
+    rather than off the wall clock. Past the finish the target stays at `floor`.
+    """
+    covered = min(1.0, max(0.0, float(progress)))
+    high = float(start)
+    low = min(float(floor), high)
+    return low + (high - low) * (1.0 - covered)
+
+
 def set_entropy(
     model: StateActorCritic,
     observations: torch.Tensor,
