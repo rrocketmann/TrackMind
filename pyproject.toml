@@ -1,7 +1,7 @@
 [project]
 name = "polytrack-agent"
 version = "0.1.0"
-description = "PPO on the PolyTrack 0.5.2 simulation in the local schoolagy checkout."
+description = "PPO on one PolyTrack 0.6.3 track in the local polytrack fork checkout."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

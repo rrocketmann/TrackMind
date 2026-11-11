@@ -6,9 +6,9 @@
 The window tails that directory's episodes.csv and log.csv and redraws lap
 progress, lap time, reference-lap fraction (or update progress), and entropy.
 With no DISPLAY, the same four panels are served on every network address of
-this machine, port 8765. The page opens on the whole run. One scrollbar pans
-along that same picture. A chase-camera video of a saved checkpoint is
-scripts/record.py, played in the local game.
+this machine, port 8765. The page opens on the whole run. Chase-camera videos
+in rollouts/ are listed under the figure, newest first. scripts/rollout_loop.py
+adds one every 10 minutes.
 """
 
 from __future__ import annotations
@@ -130,11 +130,10 @@ def _draw(run: Path, figure, axes, artists, panels) -> None:
         latest.append(averaged[-1] if averaged else float("nan"))
     entropy = latest[3]
     entropy_text = f"{entropy:.2f}" if entropy == entropy else "—"
-    stage = str(updates[-1].get("stage") or "") if updates else ""
-    title = f"{len(episodes)} laps   {len(updates)} updates   entropy {entropy_text}"
-    if stage:
-        title += f"   {stage}"
-    figure.suptitle(title, fontsize=12)
+    figure.suptitle(
+        f"{len(episodes)} laps   {len(updates)} updates   entropy {entropy_text}",
+        fontsize=12,
+    )
     return episodes, updates
 
 
@@ -214,6 +213,45 @@ def _graph_urls(port: int) -> list[str]:
     return urls
 
 
+def _rollout_index(run: Path) -> list[dict]:
+    """Newest chase video first. A video is listed only after its note is written."""
+    folder = run / "rollouts"
+    if not folder.is_dir():
+        return []
+    items = []
+    for note in folder.glob("*.json"):
+        video = folder / f"{note.stem}.webm"
+        if not video.is_file():
+            continue
+        try:
+            data = json.loads(note.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        items.append({
+            "file": video.name,
+            "url": f"/rollouts/{video.name}",
+            "update": data.get("update"),
+            "seconds": data.get("seconds"),
+            "progress": data.get("progress"),
+            "finished": data.get("finished"),
+            "when": data.get("when"),
+        })
+    items.sort(key=lambda item: int(item["update"] or 0), reverse=True)
+    return items
+
+
+def _rollout_file(run: Path, name: str) -> Path | None:
+    if not name.endswith(".webm") or "/" in name or name.startswith("."):
+        return None
+    folder = (run / "rollouts").resolve()
+    path = (folder / name).resolve()
+    if path.parent != folder or not path.is_file():
+        return None
+    return path
+
+
 def _scroll_fraction(query: str) -> float | None:
     """1000, or anything missing, is the whole run. Below that is a right edge."""
     raw = parse_qs(query).get("end", [""])[0]
@@ -237,31 +275,105 @@ def _serve(run: Path, host: str, port: int) -> None:
     page = (
         "<!doctype html><meta charset=utf-8>"
         "<title>Winter 4 training</title>"
-        "<style>body{margin:0;background:#111;color:#eee;font:14px sans-serif}"
-        "img{width:100%;height:auto;background:#fff;display:block}"
-        "input{width:100%;margin:0;accent-color:#888}</style>"
-        f"<p style='padding:8px 12px'>{run}</p>"
+        "<style>body{margin:0;background:#fff;font:14px sans-serif;color:#222}"
+        "img,video{width:100%;height:auto;background:#fff;display:block}"
+        "figure{margin:0}figcaption{padding:8px 10px 2px}"
+        "#bar{position:sticky;top:0;background:#fff;padding:8px 10px;border-bottom:1px solid #ddd;display:flex;gap:10px;align-items:center}"
+        "#end{flex:1}"
+        "</style>"
+        "<div id=bar><label for=end>View</label><input id=end type=range min=0 max=1000 value=1000>"
+        "<span id=label>full run</span><button id=live type=button>Live</button></div>"
         "<img id=g alt='training graphs'>"
-        "<input id=s type=range min=0 max=1000 value=1000 aria-label='scroll the graphs'>"
+        "<div id=v></div>"
         "<script>"
-        "const g=document.getElementById('g'), s=document.getElementById('s');"
-        "function tick(){g.src='/live.png?t='+Date.now()+(Number(s.value)>=1000?'':'&end='+s.value)}"
-        "s.addEventListener('input', tick);"
-        "g.addEventListener('wheel', function(event){"
-        "event.preventDefault();"
-        "const step=event.deltaY>0?-40:40;"
-        "s.value=String(Math.max(0, Math.min(1000, Number(s.value)+step)));"
-        "tick();"
-        "}, {passive:false});"
-        "tick(); setInterval(tick,1000);"
+        "const g=document.getElementById('g'), v=document.getElementById('v');"
+        "const end=document.getElementById('end'), label=document.getElementById('label');"
+        "const live=document.getElementById('live');"
+        "function tick(){const val=end.value; label.textContent=(val>=1000)?'full run':'to '+(val/10).toFixed(1)+'%';"
+        "g.src='/live.png?end='+encodeURIComponent(val)+'&t='+Date.now()}"
+        "live.onclick=function(){end.value=1000; tick()};"
+        "end.oninput=tick;"
+        "let seen='';"
+        "function rolls(){"
+        "fetch('/rollouts.json?t='+Date.now()).then(function(response){return response.json()}).then(function(list){"
+        "const key=list.map(function(item){return item.file}).join();"
+        "if(key===seen)return;"
+        "seen=key;"
+        "v.innerHTML=list.map(function(item){"
+        "const bits=['update '+(item.update==null?'?':item.update)];"
+        "if(item.when)bits.push(item.when);"
+        "if(item.seconds!=null)bits.push(Number(item.seconds).toFixed(1)+'s');"
+        "if(item.progress!=null)bits.push('progress '+Number(item.progress).toFixed(2));"
+        "if(item.finished)bits.push('finish');"
+        "return '<figure><figcaption>'+bits.join(' · ')+'</figcaption>"
+        "<video controls preload=metadata src=\"'+item.url+'\"></video></figure>'"
+        "}).join('')"
+        "}).catch(function(){})}"
+        "tick(); rolls(); setInterval(tick,1000); setInterval(rolls,5000);"
         "</script>"
     ).encode()
 
     class Handler(BaseHTTPRequestHandler):
+        def _send_file(self, path: Path, kind: str) -> None:
+            size = path.stat().st_size
+            start, end = 0, size - 1
+            status = 200
+            range_header = self.headers.get("Range")
+            if range_header:
+                unit, _, spec = range_header.partition("=")
+                if unit.strip() != "bytes":
+                    self.send_error(416)
+                    return
+                left, _, right = spec.partition("-")
+                try:
+                    if left:
+                        start = int(left)
+                    if right:
+                        end = int(right)
+                except ValueError:
+                    self.send_error(416)
+                    return
+                if start < 0 or start >= size or end < start:
+                    self.send_error(416)
+                    return
+                end = min(end, size - 1)
+                status = 206
+            length = end - start + 1
+            self.send_response(status)
+            self.send_header("Content-Type", kind)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(length))
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = handle.read(min(256 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
         def do_GET(self) -> None:
             path, _, query = self.path.partition("?")
             if path in ("/", "/index.html"):
                 body, kind = page, "text/html; charset=utf-8"
+            elif path == "/rollouts.json":
+                body = json.dumps(_rollout_index(run)).encode()
+                kind = "application/json"
+            elif path.startswith("/rollouts/"):
+                video = _rollout_file(run, path.removeprefix("/rollouts/"))
+                if video is None:
+                    self.send_error(404)
+                    return
+                self._send_file(video, "video/webm")
+                return
             elif path == "/live.png":
                 fraction = _scroll_fraction(query)
                 with drawing:

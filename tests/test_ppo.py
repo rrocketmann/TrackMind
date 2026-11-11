@@ -309,14 +309,15 @@ def test_entropy_can_be_raised_and_then_lowered():
     assert lowered == pytest.approx(raised - 0.2, abs=0.03)
 
 
-def test_entropy_falls_in_a_line_with_lap_progress():
-    from polytrack_agent.rl.ppo import entropy_for_progress
+def test_entropy_bonus_rises_when_low_and_falls_when_high():
+    from polytrack_agent.rl.ppo import adjust_entropy_coef
 
-    assert entropy_for_progress(0.0, 0.6, 0.08) == pytest.approx(0.6)
-    assert entropy_for_progress(0.5, 0.6, 0.08) == pytest.approx(0.34)
-    assert entropy_for_progress(1.0, 0.6, 0.08) == pytest.approx(0.08)
-    assert entropy_for_progress(1.4, 0.6, 0.08) == pytest.approx(0.08)
-    assert entropy_for_progress(-0.2, 0.6, 0.08) == pytest.approx(0.6)
+    risen = adjust_entropy_coef(0.01, 0.2, 0.6, 0.05)
+    fallen = adjust_entropy_coef(0.01, 1.2, 0.6, 0.05)
+    assert risen > 0.01
+    assert fallen < 0.01
+    clamped = adjust_entropy_coef(1.0, 0.0, 10.0, 100.0)
+    assert clamped == pytest.approx(math.exp(2.0))
 
 
 def test_entropy_wobble_keeps_a_near_miss_and_catches_a_far_one():
@@ -810,18 +811,21 @@ def test_progress_lands_on_the_gate():
 
 def test_stall_penalty_punishes_sitting_still():
     cfg = load_config(None)
-    cfg["rl"]["action_repeat"] = 10
+    cfg["rl"]["action_repeat"] = 1000
     cfg["reward"]["contact_reward"] = 0.0
     cfg["reward"]["stall_penalty"] = -0.5
     env = make_track(cfg, client=_ParkedClient())
     try:
         env.reset()
         forward = forward_ids(env.keys)[0]
+        # Pass the launch grace period before measuring the stall penalty.
+        for _ in range(2):
+            env.step(forward)
         rewards = []
         for _ in range(3):
             _frame, reward, _done, _info = env.step(forward)
             rewards.append(reward)
-        # Every idle step on the road pays the stall penalty, not just the clock.
+        # After the launch grace, every idle step on the road pays the stall penalty.
         assert all(r <= -0.5 for r in rewards)
     finally:
         env.close()

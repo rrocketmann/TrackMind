@@ -256,20 +256,23 @@ class SchoolagyTrack:
 
     def __init__(self, cfg: dict, client: SimClient | None = None):
         game = cfg["game"]
-        root = game_root(cfg)
-        track = Path(game["track"])
-        if not track.is_absolute():
-            track = root / track
-        if not track.is_file():
-            raise FileNotFoundError(f"Track file not found: {track}")
         parts = Path(game.get("parts") or Path(__file__).resolve().parents[1] / "sim" / "cache" / "track_parts.json")
         if not parts.is_file():
             raise FileNotFoundError(
                 f"Missing physics meshes at {parts}. Run `node scripts/dump_parts.mjs` once on this machine."
             )
+        if client is None:
+            root = game_root(cfg)
+            track = Path(game["track"])
+            if not track.is_absolute():
+                track = root / track
+            if not track.is_file():
+                raise FileNotFoundError(f"Track file not found: {track}")
+            self.client = SimClient(root, parts, track)
+        else:
+            self.client = client
         self.cfg = cfg
         self.keys = list(cfg["keys"])
-        self.client = client if client is not None else SimClient(root, parts, track)
         self.repeat = max(1, int(cfg["rl"].get("action_repeat") or 50))
         self.timeout_s = float(cfg["rl"].get("timeout_s") or 90)
         self.stuck_s = float(cfg["rl"].get("stuck_s") or 8)
@@ -296,9 +299,10 @@ class SchoolagyTrack:
         self.line = None
         self._cursor = 0
         self._along = 0.0
-        self.line_scale = _number(reward, "line_scale", 4.0)
-        self.line_lateral = _number(reward, "line_lateral", 0.02)
+        self.line_scale = _number(reward, "line_scale", 30.0)
+        self.line_lateral = _number(reward, "line_lateral", 0.01)
         self.line_lateral_cap = _number(reward, "line_lateral_cap", 12.0)
+        self.line_pay_falloff = _number(reward, "line_pay_falloff", 18.0)
         self.line_back_m = _number(reward, "line_back_m", 8.0)
         self.line_forward_m = _number(reward, "line_forward_m", 40.0)
         self.time_stage_penalty = _number(reward, "time_stage_penalty", 0.25)
@@ -318,6 +322,7 @@ class SchoolagyTrack:
         self._pace = 0.0
         self._beached = False
         self._respawns = 0
+        self._paid = 0.0
         self.gates, self.finish = gate_points(self.client.parts, _detectors(cfg))
         self._road = _Road(road_cells(self.client.parts))
 
@@ -447,6 +452,7 @@ class SchoolagyTrack:
         self._beached = False
         self._cursor = 0
         self._along = 0.0
+        self._paid = 0.0
         return {
             "state": state,
             "progress": 0.0,
@@ -457,9 +463,16 @@ class SchoolagyTrack:
         }
 
     def step(self, action_id: int):
-        before = self._state
-        target = int(before["frames"]) + self.repeat
+        target = int(self._state["frames"]) + self.repeat
         state = self._view(self.client.step(_controls(action_id, self.keys, self.reset_action), target))
+        return self.score(state)
+
+    def score(self, state: dict):
+        """Reward for a car state that has already been simulated.
+
+        Training and the debug page both call this, so the numbers match.
+        """
+        before = self._state
         dt = max(0.0, (int(state["frames"]) - int(before["frames"])) * 0.001)
         finished = state["finishFrames"] is not None
         progress = self._progress_of(state, finished)
@@ -491,31 +504,37 @@ class SchoolagyTrack:
             self._cursor = cursor
             length = max(self.line.length, 1e-6)
             line_progress = min(1.0, max(0.0, along_m / length))
-            near_line = line_lateral_m <= self.line_lateral_cap
+            # Full pay inside the band, then a fade across about one road width.
+            # A jump is far past that and stays at zero, including when the
+            # cursor catches up later. Paid metres use the same weight, so the
+            # time stage does not start from cursor movement alone.
+            weight = self._along_weight(line_lateral_m) if on_track else 0.0
+            if weight > 0.0 and delta > 0.0:
+                self._paid += delta * weight
             if self.reward_stage == "line" and on_track:
-                # Far from the matched point is a jump the cursor has not reached.
-                # That advance is not paid, including when the cursor catches up later.
-                if near_line:
-                    reward += (delta / length) * self.line_scale
+                if weight > 0.0:
+                    reward += (delta / length) * self.line_scale * weight
                 reward -= self.line_lateral * min(self.line_lateral_cap, line_lateral_m) * dt
             elif self.reward_stage == "time":
                 reward -= self.time_stage_penalty * dt
-                if on_track and near_line:
-                    reward += (delta / length) * self.time_line_scale
+                if weight > 0.0:
+                    reward += (delta / length) * self.time_line_scale * weight
         else:
             reward -= self.time_penalty * dt
             if on_track:
                 reward += (progress - previous) * self.progress_scale
         # Speed toward the next gate pays on top of the chord, and only on the
         # track. The reference lap and the time fine-tune do not use it. A
-        # sudden loss of chassis speed is a hit either way.
+        # sudden loss of chassis speed is a hit in the chord stage. The
+        # reference lap does not charge it: one wall tap was worth more than
+        # the rest of the lap, so the policy stopped early.
         ground_kmh, along_kmh = self._motion_kmh(state)
         cap = max(1.0, self.speed_cap_kmh)
         if on_track and not using_line:
             reward += self.speed_reward * min(cap, max(-cap, along_kmh)) / cap
         allowed = self.speed_drop_margin * dt
         lost = self._pace - ground_kmh
-        if lost > allowed:
+        if not using_line and lost > allowed:
             reward -= self.speed_drop_penalty * (lost - allowed) / cap
         self._pace = ground_kmh
         # Speed with no chord progress is a stuck car. The first two seconds
@@ -562,7 +581,8 @@ class SchoolagyTrack:
         self._slow = 0.0 if (not creeping and ground > 3.0) or int(state["frames"]) < 2000 else self._slow + dt
         # Sitting on the road without going anywhere must cost, or the policy
         # learns that the safest way to never leave the road is to never drive.
-        if on_track and moved < floor and not finished:
+        # The first two seconds are launch; other stuck timers share that grace.
+        if on_track and moved < floor and not finished and int(state["frames"]) >= 2000:
             reward += self.stall_penalty
         fell = float(state["position"]["y"]) < self._origin_y - 8.0
         timed_out = int(state["frames"]) * 0.001 >= self.timeout_s
@@ -627,10 +647,89 @@ class SchoolagyTrack:
             "speed": speed,
             "ground_speed": ground,
             "line_progress": line_progress,
+            "line_paid": (
+                min(1.0, max(0.0, self._paid / max(self.line.length, 1e-6)))
+                if self.line is not None
+                else 0.0
+            ),
             "line_lateral": line_lateral_m,
             "reward_stage": self.reward_stage,
+            "on_track": on_track,
+            "reward": float(reward),
         }
         return None, float(reward), done, info
+
+    def observe(self, state: dict):
+        """Score one external car state. A rewind, such as a restart, arms again.
+
+        The first sample sets the spawn and pays nothing. Later samples use
+        the same reward as a training step.
+        """
+        viewed = self._view(state)
+        frames = int(viewed["frames"])
+        previous = int(self._state.get("frames") or 0) if self._state else -1
+        if not self._state or frames + 5 < previous:
+            self._arm(viewed)
+            return 0.0, self._glance(viewed)
+        _frame, reward, _done, info = self.score(viewed)
+        return float(reward), info
+
+    def _arm(self, state: dict) -> None:
+        self._state = state
+        self._origin_y = float(state["position"]["y"])
+        self._origin_xz = (float(state["position"]["x"]), float(state["position"]["z"]))
+        finished = state["finishFrames"] is not None
+        self._progress = self._progress_of(state, finished)
+        self._mark = self._progress
+        self._flat = 0.0
+        self._checkpoint = int(state["nextCheckpointIndex"])
+        self._slow = 0.0
+        self._airborne_s = 0.0
+        self._last_xy = (float(state["position"]["x"]), float(state["position"]["z"]))
+        self._pace = 0.0
+        self._beached = False
+        self._respawns = 0
+        self._cursor = 0
+        self._along = 0.0
+        self._paid = 0.0
+
+    def _glance(self, state: dict) -> dict:
+        """Numbers for the first sample, before a step has been scored."""
+        finished = state["finishFrames"] is not None
+        progress = self._progress_of(state, finished)
+        border = state.get("border") or {}
+        clearance = border.get("clearance")
+        down = self._wheels_down(state)
+        on_track = down > 0 and (clearance is None or float(clearance) >= 0.0)
+        return {
+            "state": state,
+            "progress": progress,
+            "dt": 0.0,
+            "finished": finished,
+            "stuck": False,
+            "beached": False,
+            "fell": False,
+            "wheels_down": down,
+            "timeout": False,
+            "speed": float(state.get("speedKmh") or 0.0),
+            "line_progress": 0.0,
+            "line_paid": 0.0,
+            "line_lateral": 0.0,
+            "reward_stage": self.reward_stage,
+            "on_track": on_track,
+            "reward": 0.0,
+        }
+
+    def _along_weight(self, lateral_m: float) -> float:
+        """1 on the racing line, fading to 0 across `line_pay_falloff` metres."""
+        lateral = max(0.0, float(lateral_m))
+        cap = max(0.0, self.line_lateral_cap)
+        if lateral <= cap:
+            return 1.0
+        span = max(0.0, self.line_pay_falloff)
+        if span <= 0.0 or lateral >= cap + span:
+            return 0.0
+        return (cap + span - lateral) / span
 
     def use_line(self, line, stage: str = "line") -> None:
         """Follow one archived lap until the trainer sets the stage to time."""
@@ -640,6 +739,7 @@ class SchoolagyTrack:
         self.reward_stage = stage
         self._cursor = 0
         self._along = 0.0
+        self._paid = 0.0
 
     def _reset_id(self) -> int:
         """The action id whose mask holds `reset`, or 0 when it is disabled."""

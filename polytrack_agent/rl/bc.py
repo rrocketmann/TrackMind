@@ -128,15 +128,21 @@ def _samples(rows: list[dict], chords: int) -> tuple[np.ndarray, np.ndarray]:
     return np.stack(observations), np.asarray(actions, dtype=np.int64)
 
 
-def load_demos(bc_cfg: dict, keys: list[str]) -> Demos:
-    """Fast clean laps on the track with the most archived finishes."""
+def load_demos(bc_cfg: dict, keys: list[str], *, reset_action: bool = False) -> Demos:
+    """Fast clean laps on one track (or the track with the most archived finishes)."""
     root = archive_root(bc_cfg)
     margin = float(bc_cfg.get("margin_s") if bc_cfg.get("margin_s") is not None else 0.5)
     if margin < 0:
         raise ValueError(f"bc.margin_s must be >= 0, got {margin}")
-    chords = n_actions(keys)
+    chords = n_actions(keys, reset_action=reset_action)
     indexed = _index_rows(root)
-    track = _popular_track(indexed)
+    wanted = bc_cfg.get("track")
+    if wanted:
+        track = str(wanted)
+        if not any(str(row.get("track")) == track for row in indexed):
+            raise ValueError(f"{track} has no laps in {root}")
+    else:
+        track = _popular_track(indexed)
     ranked = sorted(
         (row for row in indexed if str(row["track"]) == track and row.get("seconds") is not None),
         key=lambda row: float(row["seconds"]),
@@ -173,10 +179,16 @@ def load_demos(bc_cfg: dict, keys: list[str]) -> Demos:
 
 
 def load_best_line(bc_cfg: dict) -> ReferenceLine:
-    """The single fastest clean lap on the track with the most finishes."""
+    """The single fastest clean lap on one track (or the track with the most finishes)."""
     root = archive_root(bc_cfg)
     indexed = _index_rows(root)
-    track = _popular_track(indexed)
+    wanted = bc_cfg.get("track")
+    if wanted:
+        track = str(wanted)
+        if not any(str(row.get("track")) == track for row in indexed):
+            raise ValueError(f"{track} has no laps in {root}")
+    else:
+        track = _popular_track(indexed)
     ranked = sorted(
         (row for row in indexed if str(row["track"]) == track and row.get("seconds") is not None),
         key=lambda row: float(row["seconds"]),
@@ -195,6 +207,27 @@ def load_best_line(bc_cfg: dict) -> ReferenceLine:
             return line
     best = float(ranked[0]["seconds"])
     raise ValueError(f"No clean {track} lap to follow near {best:.3f}s in {root}")
+
+
+def clone_coef(update: int, full: float, hold: int, end: int) -> float:
+    """Full clone weight through `hold` updates, then a straight taper to zero at `end`.
+
+    `update` is how many PPO updates have already finished. Past `end` the
+    clone loss is gone.
+    """
+    weight = float(full)
+    if weight <= 0.0:
+        return 0.0
+    done = int(update)
+    stop = int(end)
+    if stop <= 0 or done >= stop:
+        return 0.0
+    kept = int(hold)
+    if kept < 0:
+        kept = 0
+    if kept >= stop or done <= kept:
+        return weight
+    return weight * (stop - done) / (stop - kept)
 
 
 def behavior_clone(
